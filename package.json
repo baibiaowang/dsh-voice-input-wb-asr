@@ -1,6 +1,6 @@
 {
   "name": "dsh-voice-input-wb-asr",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "WorkBuddy (wb-asr) cloud recognition for dsh, plus a hold-to-talk microphone in the composer (pointer, or Alt while the caret is in the composer)",
   "type": "module",
   "license": "MIT",

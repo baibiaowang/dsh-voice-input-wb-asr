@@ -19,15 +19,13 @@
   "settingsSaving": "Saving…",
   "settingsSaved": "Saved",
   "settingsFailed": "Could not save ({status})",
+  "fieldRegion": "Recognizer region (tick one)",
+  "regionAi": "International (www.workbuddy.ai)",
+  "regionCn": "Domestic (www.workbuddy.cn)",
+  "regionHint": "The ticked row is the one used: its endpoint and its accounts. International is the default; the domestic build is only used after you tick it.",
+  "accounts": "{count} accounts on this region",
   "fieldMinHold": "Minimum take",
   "fieldEffect": "Diffusion rings",
   "fieldColor": "Ring colour",
-  "unitMs": "ms",
-  "fieldRegion": "Recognizer region",
-  "fieldEnableCn": "Enable domestic build",
-  "regionAi": "International (workbuddy.ai)",
-  "regionCn": "Domestic (workbuddy.cn)",
-  "regionHint": "International by default. The domestic build has to be enabled here first; until then nothing contacts the domestic service and its accounts are ignored.",
-  "regionCnOff": "domestic build not enabled",
-  "accounts": "{count} accounts available"
+  "unitMs": "ms"
 }

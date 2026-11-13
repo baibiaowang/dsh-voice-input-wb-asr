@@ -30,10 +30,8 @@ export const name = "voice-input-wb-asr";
  * running plugin instead of restarting it, which is what makes the microphone
  * usable straight after a change. */
 const Config = z.object({
-  enableCn: z.boolean().default(false)
-    .description("启用国内版（www.workbuddy.cn）。关闭时只用国际版，本机的国内版账号一律不参与识别。").volatile(),
   activeRegion: z.string().default("ai")
-    .description("当前线路：ai 国际版，cn 国内版。国内版要先在上面启用，否则即使选了 cn 也仍然走国际版。").volatile(),
+    .description("识别线路：ai 国际版（www.workbuddy.ai），cn 国内版（www.workbuddy.cn）。默认国际版，只有选中某项才会用那条线路的账号和入口。").volatile(),
   accountPool: z.boolean().default(true)
     .description("自动读取本机已登录的 WorkBuddy 账号，按线路挑账号，握手被拒自动换下一个。").volatile(),
   aiEndpoint: z.string().default("https://www.workbuddy.ai")
@@ -108,13 +106,12 @@ function regionOf(endpoint) {
 /**
  * 当前生效的线路。
  *
- * 国内版是可选功能：没打开 `enableCn` 时一律按国际版处理，即使 `activeRegion`
- * 写着 cn 也不松口——这样默认安装永远不会因为本机存着国内账号而偷偷走国内入口。
+ * 只有明确选中国内版才走国内入口：默认（以及任何无法识别的取值）都是国际版，
+ * 所以本机存着国内账号也不会让默认安装偷偷连国内服务。
  */
 function activeRegion(config) {
   const wanted = String(field(config, "activeRegion", "ai")).trim().toLowerCase();
-  if (wanted !== "cn") return "ai";
-  return field(config, "enableCn", false) === true ? "cn" : "ai";
+  return wanted === "cn" ? "cn" : "ai";
 }
 
 /** 该线路的识别入口。 */
@@ -162,7 +159,10 @@ function normalizeAccount(raw, source) {
   const token = typeof box?.accessToken === "string" ? box.accessToken.trim()
     : typeof box?.access_token === "string" ? box.access_token.trim()
       : "";
-  if (!token) return undefined;
+  // A real WorkBuddy access token is a JWT of well over a thousand characters.
+  // Short values in these files are placeholders left by an interrupted write;
+  // they would only produce a 401 on the first take.
+  if (token.length < 100) return undefined;
   const variant = String(raw?.variant ?? "").toLowerCase();
   const domain = typeof box?.domain === "string" && box.domain ? "https://" + box.domain : "";
   return {
@@ -175,22 +175,42 @@ function normalizeAccount(raw, source) {
   };
 }
 
-/** 本机能拿到的全部账号（不含 token.txt 兜底）。 */
+/**
+ * 本机能拿到的全部账号（不含 token.txt 兜底）。
+ *
+ * 同一个账号会在多个池子里各留一份，而且每次重登都会换上新的 access_token ——
+ * 按 token 去重会把一个账号数成好几个。身份按 `uid` 认，同一个 uid 只留一条，
+ * 优先留没过期的、过期时间最远的那个 token。
+ */
 function discoverAccounts() {
-  const accounts = [];
-  const seen = new Set();
+  const byIdentity = new Map();
+  const anonymous = [];
+  const seenTokens = new Set();
   for (const path of accountPoolPaths()) {
     const parsed = readJsonFile(path);
     if (parsed === undefined) continue;
     const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.accounts) ? parsed.accounts : [];
     for (const raw of list) {
       const account = normalizeAccount(raw, path);
-      if (!account || seen.has(account.token)) continue;
-      seen.add(account.token);
-      accounts.push(account);
+      if (!account) continue;
+      // The same token often appears in two pools; without this the anonymous
+      // token.txt entry would be counted as one account more than it is.
+      if (seenTokens.has(account.token)) continue;
+      seenTokens.add(account.token);
+      if (!account.uid) {
+        anonymous.push(account);
+        continue;
+      }
+      const previous = byIdentity.get(account.uid);
+      if (previous === undefined) {
+        byIdentity.set(account.uid, account);
+        continue;
+      }
+      const better = account.expiresAt > previous.expiresAt ? account : previous;
+      byIdentity.set(account.uid, better);
     }
   }
-  return accounts;
+  return [...byIdentity.values(), ...anonymous];
 }
 
 /**
@@ -205,10 +225,15 @@ function tokenCandidates(config) {
   const region = activeRegion(config);
   const candidates = [];
   const seen = new Set();
-  const push = (token, label) => {
+  const push = (token, label, identity) => {
     const value = typeof token === "string" ? token.trim() : "";
-    if (!value || seen.has(value)) return;
+    if (!value) return;
+    // Both the token and the account identity are checked: two pools can hold the
+    // same account with different tokens, and one take must not burn two tries on it.
+    const key = identity || value;
+    if (seen.has(value) || seen.has(key)) return;
     seen.add(value);
+    seen.add(key);
     candidates.push({ token: value, label: label ?? "pool-" + (candidates.length + 1) });
   };
 
@@ -232,7 +257,7 @@ function tokenCandidates(config) {
         if (a.expired !== b.expired) return a.expired ? 1 : -1;
         return b.account.expiresAt - a.account.expiresAt;
       });
-    for (const entry of ranked) push(entry.account.token);
+    for (const entry of ranked) push(entry.account.token, undefined, entry.account.uid ? "uid:" + entry.account.uid : undefined);
   }
 
   const skillDir = config?.skillDir
@@ -245,6 +270,14 @@ function tokenCandidates(config) {
     if (token) push(token, "file");
   }
   return candidates;
+}
+
+/** 当前线路有多少个可用账号（去重后的真实账号数，不含 token.txt 兜底）。 */
+function regionAccountCount(config) {
+  const region = activeRegion(config);
+  return discoverAccounts()
+    .filter((account) => !account.needsRelogin && account.region === region)
+    .length;
 }
 
 /**
@@ -654,12 +687,10 @@ function clientSettings(config) {
   const minHoldMs = Number(field(config, "minHoldMs", 320));
   const effect = field(config, "effect", true);
   const ringColor = field(config, "ringColor", "#00ff9d");
-  const accounts = tokenCandidates(config).length;
   return {
     endpoint: String(endpoint),
     region: activeRegion(config),
-    enableCn: field(config, "enableCn", false) === true,
-    accounts,
+    accounts: regionAccountCount(config),
     timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 30000,
     minHoldMs: Number.isFinite(minHoldMs) ? minHoldMs : 320,
     effect: effect !== false,
@@ -725,17 +756,7 @@ function registerRoutes(ctx, { getConfig }) {
           if (body && typeof body.minHoldMs === "number") patch.minHoldMs = body.minHoldMs;
           if (body && typeof body.effect === "boolean") patch.effect = body.effect;
           if (body && typeof body.ringColor === "string") patch.ringColor = body.ringColor;
-          if (body && typeof body.enableCn === "boolean") {
-            patch.enableCn = body.enableCn;
-            // Turning the domestic build off must not leave the switch pointing at
-            // an endpoint that is no longer allowed; fall back to the default build.
-            if (body.enableCn === false) patch.activeRegion = "ai";
-          }
           if (body && (body.activeRegion === "ai" || body.activeRegion === "cn")) {
-            const live = getConfig();
-            if (body.activeRegion === "cn" && field(live, "enableCn", false) !== true) {
-              return sendJson(res, 400, { error: "cn-not-enabled" });
-            }
             patch.activeRegion = body.activeRegion;
           }
           if (Object.keys(patch).length === 0) return sendJson(res, 400, { error: "no known field" });
@@ -760,9 +781,8 @@ function registerRoutes(ctx, { getConfig }) {
           provider: "wb-asr-cloud",
           endpoint,
           region: activeRegion(live),
-          enableCn: field(live, "enableCn", false) === true,
           streaming: true,
-          accounts: tokenCandidates(live).length,
+          accounts: regionAccountCount(live),
         });
       },
     });

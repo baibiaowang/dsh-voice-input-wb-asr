@@ -53,8 +53,7 @@ To use a token that is not on this machine, set `WORKBUDDY_ASR_TOKEN` — it is 
 
 | Field | Default | Meaning |
 |---|---|---|
-| `enableCn` | `false` | Switch the domestic build on. While it is off nothing contacts `workbuddy.cn` and domestic accounts are left out of the pool. |
-| `activeRegion` | `ai` | `ai` international, `cn` domestic. Selecting `cn` while `enableCn` is off is refused. |
+| `activeRegion` | `ai` | Which build to use: `ai` international, `cn` domestic. Shown as two checkboxes in settings — the ticked one is used. |
 | `accountPool` | `true` | Read the accounts signed in on this machine and fail over between them. |
 | `aiEndpoint` | `https://www.workbuddy.ai` | International recognizer base URL; only change it for a self-hosted gateway. |
 | `cnEndpoint` | `https://www.workbuddy.cn` | Domestic recognizer base URL; only change it for a self-hosted gateway. |
@@ -75,8 +74,8 @@ Every field is volatile: an edit applies to the running plugin without a restart
 ## Notes and limitations
 
 - The ASR protocol is unofficial — reverse engineered from the WorkBuddy web client, the same protocol the `wb-asr` skill speaks. It can break when the service changes.
-- A token belongs to one region: a domestic account fails on the international endpoint and vice versa. That is why the two builds are separate settings rather than one automatic choice — the plugin never contacts the domestic service unless you switch it on.
-- Switching the domestic build off also moves the active region back to international, so the plugin cannot be left pointing at a disabled endpoint.
+- A token belongs to one region: a domestic account fails on the international endpoint and vice versa. That is why the two builds are separate choices rather than one automatic fallback — the plugin never contacts the domestic service unless you tick it.
+- The account count shown next to the choices is the number of distinct accounts on that region, deduplicated by account id: the same account appears in several local pools and each re-login leaves a new token, so counting entries would overstate it.
 - The pool has no rate-limit awareness: it fails over on rejection, but it does not rotate between takes.
 - Chinese and English recognition quality depends on the service, not on this plugin.
 - No wake word, no continuous dictation: it is push-to-talk only.

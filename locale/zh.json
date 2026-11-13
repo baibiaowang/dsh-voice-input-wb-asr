@@ -19,15 +19,13 @@
   "settingsSaving": "正在保存…",
   "settingsSaved": "已保存",
   "settingsFailed": "保存失败（{status}）",
+  "fieldRegion": "识别线路（勾选一个）",
+  "regionAi": "国际版（www.workbuddy.ai）",
+  "regionCn": "国内版（www.workbuddy.cn）",
+  "regionHint": "勾选哪个就用哪条线路：它的入口和它的账号。默认国际版，国内版只有手动勾选后才会使用。",
+  "accounts": "当前线路可用账号 {count} 个",
   "fieldMinHold": "最短录音",
   "fieldEffect": "扩散光圈",
   "fieldColor": "光圈颜色",
-  "unitMs": "毫秒",
-  "fieldRegion": "识别线路",
-  "fieldEnableCn": "启用国内版",
-  "regionAi": "国际版（workbuddy.ai）",
-  "regionCn": "国内版（workbuddy.cn）",
-  "regionHint": "默认国际版。国内版要先在这里启用，否则不会连接国内服务，本机的国内版账号也不参与识别。",
-  "regionCnOff": "国内版未启用",
-  "accounts": "可用账号 {count} 个"
+  "unitMs": "毫秒"
 }

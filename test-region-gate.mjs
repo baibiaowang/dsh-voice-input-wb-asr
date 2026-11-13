@@ -47,8 +47,8 @@ async function call(method, body) {
 }
 const show = (label, r) => console.log(label, r.status, JSON.stringify(r.body));
 
-show("1 default          :", await call("GET"));
-show("2 select cn (off)  :", await call("POST", { activeRegion: "cn" }));
-show("3 enable cn        :", await call("POST", { enableCn: true }));
-show("4 select cn (on)   :", await call("POST", { activeRegion: "cn" }));
-show("5 disable cn       :", await call("POST", { enableCn: false }));
+show("1 default (ai)     :", await call("GET"));
+show("2 tick cn          :", await call("POST", { activeRegion: "cn" }));
+show("3 tick cn again    :", await call("POST", { activeRegion: "cn" }));
+show("4 tick ai          :", await call("POST", { activeRegion: "ai" }));
+show("5 bogus value      :", await call("POST", { activeRegion: "xx" }));

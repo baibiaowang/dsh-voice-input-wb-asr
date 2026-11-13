@@ -60,13 +60,11 @@ window.__ModuleLoader__.load({
       'fieldEffect': '扩散光圈',
       'fieldColor': '光圈颜色',
       'unitMs': '毫秒',
-      'fieldRegion': '识别线路',
-      'fieldEnableCn': '启用国内版',
-      'regionAi': '国际版（workbuddy.ai）',
-      'regionCn': '国内版（workbuddy.cn）',
-      'regionHint': '默认国际版。国内版要先在这里启用，否则不会连接国内服务，本机的国内版账号也不参与识别。',
-      'regionCnOff': '国内版未启用',
-      'accounts': '可用账号 {count} 个',
+      'fieldRegion': '识别线路（勾选一个）',
+      'regionAi': '国际版（www.workbuddy.ai）',
+      'regionCn': '国内版（www.workbuddy.cn）',
+      'regionHint': '勾选哪个就用哪条线路：它的入口和它的账号。默认国际版，国内版只有手动勾选后才会使用。',
+      'accounts': '当前线路可用账号 {count} 个',
     };
     var EN = {
       'hold': 'Hold to talk (or hold Alt)',
@@ -89,13 +87,11 @@ window.__ModuleLoader__.load({
       'fieldEffect': 'Diffusion rings',
       'fieldColor': 'Ring colour',
       'unitMs': 'ms',
-      'fieldRegion': 'Recognizer region',
-      'fieldEnableCn': 'Enable domestic build',
-      'regionAi': 'International (workbuddy.ai)',
-      'regionCn': 'Domestic (workbuddy.cn)',
-      'regionHint': 'International by default. The domestic build has to be enabled here first; until then nothing contacts the domestic service and its accounts are ignored.',
-      'regionCnOff': 'domestic build not enabled',
-      'accounts': '{count} accounts available',
+      'fieldRegion': 'Recognizer region (tick one)',
+      'regionAi': 'International (www.workbuddy.ai)',
+      'regionCn': 'Domestic (www.workbuddy.cn)',
+      'regionHint': 'The ticked row is the one used: its endpoint and its accounts. International is the default; the domestic build is only used after you tick it.',
+      'accounts': '{count} accounts on this region',
     };
 
     /** Filled in by the locale service; the fallbacks above stay in place. */
@@ -113,7 +109,7 @@ window.__ModuleLoader__.load({
     /** The settings the Host applies to the next take. */
     var DEFAULTS = {
       minHoldMs: MIN_HOLD_MS, effect: true, ringColor: DEFAULT_RING, language: 'auto',
-      region: 'ai', enableCn: false, accounts: 0,
+      region: 'ai', accounts: 0,
     };
 
     /**
@@ -132,7 +128,6 @@ window.__ModuleLoader__.load({
             ringColor: typeof payload.ringColor === 'string' && payload.ringColor ? payload.ringColor : DEFAULT_RING,
             language: typeof payload.language === 'string' ? payload.language : DEFAULTS.language,
             region: payload.region === 'cn' ? 'cn' : 'ai',
-            enableCn: payload.enableCn === true,
             accounts: typeof payload.accounts === 'number' ? payload.accounts : 0,
           };
         })
@@ -195,9 +190,8 @@ window.__ModuleLoader__.load({
       '.dsh-wbvi-form input[type="color"]{width:44px;height:26px;padding:0;border-radius:6px;',
       'border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.12));background:transparent}',
       '.dsh-wbvi-note{margin:0;font-size:12px;color:var(--dsw-alias-label-secondary,#8b8b8b)}',
-      '.dsh-wbvi-row select{font:inherit;padding:2px 6px;border-radius:6px;',
-      'background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.12));',
-      'color:var(--dsw-alias-label-primary,#e6e6e6);border:1px solid var(--dsw-alias-border-default,rgba(127,127,127,.28))}',
+      '.dsh-wbvi-choice{cursor:pointer}',
+      '.dsh-wbvi-choice input{cursor:pointer;width:14px;height:14px;margin:0}',
     ].join('');
 
     /* ---------------------------------------------------------- resampling */
@@ -846,12 +840,6 @@ window.__ModuleLoader__.load({
           body: JSON.stringify({ [field]: value }),
         })
           .then(function check(response) {
-            if (response.status === 400) {
-              return response.json().then(function rejected(payload) {
-                if (payload && payload.error === 'cn-not-enabled') throw new Error(translate('regionCnOff'));
-                throw new Error(translate('settingsFailed', { status: response.status }));
-              });
-            }
             if (!response.ok) throw new Error(translate('settingsFailed', { status: response.status }));
             return response.json();
           })
@@ -860,8 +848,7 @@ window.__ModuleLoader__.load({
             else setValues(function merge(previous) {
               var next = {
                 minHoldMs: previous.minHoldMs, effect: previous.effect, ringColor: previous.ringColor,
-                language: previous.language, region: previous.region, enableCn: previous.enableCn,
-                accounts: previous.accounts,
+                language: previous.language, region: previous.region, accounts: previous.accounts,
               };
               next[field] = value;
               return next;
@@ -877,32 +864,28 @@ window.__ModuleLoader__.load({
         : status === 'saved' ? translate('settingsSaved')
           : status.indexOf('error:') === 0 ? status.slice(6) : '';
 
-      // The domestic build is opt-in, so the enable switch sits above the region
-      // choice: with it off the region select is pinned to International and the
-      // Host refuses a domestic selection outright.
-      var regionRow = h('label', { className: 'dsh-wbvi-row' },
-        h('span', { className: 'dsh-wbvi-name' }, translate('fieldRegion')),
-        h('select', {
-          value: values.region,
-          disabled: !values.enableCn,
-          onChange: function chosen(event) { save('activeRegion', event.target.value); },
-        },
-          h('option', { value: 'ai' }, translate('regionAi')),
-          h('option', { value: 'cn' }, values.enableCn ? translate('regionCn') : translate('regionCn') + '（' + translate('regionCnOff') + '）'),
-        ),
-        h('span', { className: 'dsh-wbvi-unit' }, translate('accounts', { count: values.accounts })),
-      );
-
-      return h('div', { className: 'dsh-wbvi-form' },
-        h('label', { className: 'dsh-wbvi-row' },
-          h('span', { className: 'dsh-wbvi-name' }, translate('fieldEnableCn')),
+      // Two checkboxes, one choice: whichever is ticked is the build in use.
+      // International is ticked by default and stays ticked until the user picks
+      // the domestic one, so an untouched install never contacts workbuddy.cn.
+      function regionOption(value, label) {
+        return h('label', { className: 'dsh-wbvi-row dsh-wbvi-choice' },
           h('input', {
             type: 'checkbox',
-            checked: values.enableCn,
-            onChange: function toggled(event) { save('enableCn', event.target.checked); },
+            checked: values.region === value,
+            onChange: function picked(event) {
+              if (!event.target.checked) return; // unticking the active one is a no-op
+              save('activeRegion', value);
+            },
           }),
-        ),
-        regionRow,
+          h('span', { className: 'dsh-wbvi-name' }, label),
+        );
+      }
+
+      return h('div', { className: 'dsh-wbvi-form' },
+        h('span', { className: 'dsh-wbvi-name' }, translate('fieldRegion')),
+        regionOption('ai', translate('regionAi')),
+        regionOption('cn', translate('regionCn')),
+        h('p', { className: 'dsh-wbvi-note' }, translate('accounts', { count: values.accounts })),
         h('p', { className: 'dsh-wbvi-note' }, translate('regionHint')),
         h('label', { className: 'dsh-wbvi-row' },
           h('span', { className: 'dsh-wbvi-name' }, translate('fieldMinHold')),
