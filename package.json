@@ -30,7 +30,6 @@
     "test-region-gate.mjs",
     "test-standalone.mjs",
     "test-client-alt.mjs",
-    "test-settings-render.mjs",
     "test-settings-render.mjs"
   ],
   "peerDependencies": {
