@@ -29,7 +29,9 @@
     "test-region.mjs",
     "test-region-gate.mjs",
     "test-standalone.mjs",
-    "test-client-alt.mjs"
+    "test-client-alt.mjs",
+    "test-settings-render.mjs",
+    "test-settings-render.mjs"
   ],
   "peerDependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
