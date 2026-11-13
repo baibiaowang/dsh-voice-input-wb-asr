@@ -11,6 +11,8 @@ Recognition runs on the WorkBuddy cloud ASR service, so no local model is downlo
 - **Hold-to-talk** in the composer, with optional diffusion-ring feedback while recording.
 - **Streams while you hold**: raw 16 kHz / 16-bit / mono PCM is pushed to the host half as you speak, so releasing the button only waits for the last syllable instead of the whole clip.
 - **Registers as a provider** for the shipped speech-to-text service when that service is mounted, so a profile that keeps the click-to-start microphone still works. Where it does, the shipped microphone button is disabled so the composer carries one microphone, not two.
+- **Uses the accounts already signed in on this machine.** Tokens are read from the local WorkBuddy account stores; when one is rejected the next account is tried, so a stale token does not break the button.
+- **International and domestic builds.** The region decides the endpoint: `www.workbuddy.ai` for the international build, `www.workbuddy.cn` for the domestic one. A token only works on its own region, and the account pool records which one each token belongs to.
 - **No dependencies outside Node built-ins**: the WebSocket client and the RIFF/WAVE reader are part of the plugin.
 
 ## Requirements
@@ -32,22 +34,28 @@ dsh plugin --profile <profile> add github:<owner>/dsh-voice-input-wb-asr
 
 Restart the host (or reload the profile) after installing.
 
-## Configure the token
+## Accounts
 
-The host half looks for a token in this order, first hit wins:
+The plugin reads the WorkBuddy accounts already signed in on this machine — nothing to configure:
 
-1. Environment variable `WORKBUDDY_ASR_TOKEN`.
-2. The `token` field in the plugin configuration.
-3. `~/.dsh/skills/wb-asr/token.txt` — first line.
-4. `~/.workbuddy-asr/wb-asr-token.txt` — first line (`WORKBUDDY_ASR_KEY_DIR` overrides the directory).
+| Source | What it holds |
+|---|---|
+| `~/.dsh/.xdpool/accounts.json` | Accounts pooled by the `dsh-xdpool` plugin, with their region. |
+| `~/.wb-switch/accounts.json` | Accounts recorded by `workbuddy-switch`. |
+| `~/.dsh/skills/wb-asr/tokens.json`, `~/.workbuddy/skills/wb-asr/tokens.json` | The `wb-asr` skill's own token list. |
+| `~/.dsh/skills/wb-asr/token.txt`, `~/.workbuddy-asr/wb-asr-token.txt` | A single fallback token, first line. |
 
-Put the token on the first line of the file, one token per file. Never commit it.
+Expired and re-login-required entries are sorted last; the account currently signed into the desktop app goes first. If the recognizer rejects a token, the next account is tried automatically — up to every account the machine knows. Files are only read, never written. `WORKBUDDY_ASR_ACCOUNTS` points the pool at a different file.
+
+To use a token that is not on this machine, set `WORKBUDDY_ASR_TOKEN` — it is tried first. Never commit a token.
 
 ## Settings
 
 | Field | Default | Meaning |
 |---|---|---|
-| `endpoint` | `https://www.workbuddy.ai` | Recognizer base URL; only change it for a self-hosted gateway. |
+| `region` | `auto` | `auto` uses the endpoint below; `ai` forces `www.workbuddy.ai`; `cn` forces `www.workbuddy.cn`. |
+| `accountPool` | `true` | Read the accounts signed in on this machine and fail over between them. |
+| `endpoint` | `https://www.workbuddy.ai` | Recognizer base URL, used when `region` is `auto`; only change it for a self-hosted gateway. |
 | `timeoutMs` | `30000` | Per-request timeout. Raise it on a slow network. |
 | `minHoldMs` | `320` | Presses shorter than this are treated as a mis-tap and are not uploaded. |
 | `effect` | `true` | Show diffusion rings while recording. |
@@ -57,13 +65,16 @@ Every field is volatile: an edit applies to the running plugin without a restart
 
 ## Privacy
 
-- Audio leaves your machine: the recording is streamed to the WorkBuddy endpoint named in `endpoint`.
+- Audio leaves your machine: the recording is streamed to the WorkBuddy endpoint selected by `region`.
+- Tokens are read from your own account files and stay in the host half: they are never sent to the browser, and the plugin writes nothing back.
 - The token stays on the host: it is never sent to the browser half.
 - Nothing is stored on disk by the plugin; there is no transcript history.
 
 ## Notes and limitations
 
 - The ASR protocol is unofficial — reverse engineered from the WorkBuddy web client, the same protocol the `wb-asr` skill speaks. It can break when the service changes.
+- A token belongs to one region: a domestic account fails on the international endpoint and vice versa. Leave `region` on `auto` unless the machine has accounts from both builds and the automatic choice is wrong.
+- The pool has no rate-limit awareness: it fails over on rejection, but it does not rotate between takes.
 - Chinese and English recognition quality depends on the service, not on this plugin.
 - No wake word, no continuous dictation: it is push-to-talk only.
 

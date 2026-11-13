@@ -1,6 +1,6 @@
 {
   "name": "dsh-voice-input-wb-asr",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "WorkBuddy (wb-asr) cloud recognition for dsh, plus a hold-to-talk microphone in the composer (pointer, or Alt while the caret is in the composer)",
   "type": "module",
   "license": "MIT",
@@ -23,8 +23,10 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
+    "test-shim.mjs",
     "test-resolve.mjs",
     "test-stream.mjs",
+    "test-region.mjs",
     "test-standalone.mjs",
     "test-client-alt.mjs"
   ],

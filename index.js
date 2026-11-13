@@ -30,8 +30,12 @@ export const name = "voice-input-wb-asr";
  * running plugin instead of restarting it, which is what makes the microphone
  * usable straight after a change. */
 const Config = z.object({
+  region: z.string().default("auto")
+    .description("线路：auto 用下面的地址；ai 国际版 www.workbuddy.ai；cn 国内版 www.workbuddy.cn。").volatile(),
+  accountPool: z.boolean().default(true)
+    .description("自动读取本机已登录的 WorkBuddy 账号（~/.wb-switch/accounts.json 与 wb-asr 技能目录），按线路挑账号，握手被拒自动换下一个。").volatile(),
   endpoint: z.string().default("https://www.workbuddy.ai")
-    .description("WorkBuddy 识别服务地址。只有改用自建网关时才需要修改。").volatile(),
+    .description("识别服务地址。region 填了 ai/cn 时以 region 为准；只有改用自建网关才需要改这里。").volatile(),
   timeoutMs: z.number().step(1000).min(3000).max(300000).default(30000)
     .description("单次识别的超时时间（毫秒）。网络慢时可以调大。").volatile(),
   minHoldMs: z.number().step(10).min(0).max(2000).default(320)
@@ -48,7 +52,10 @@ export { Config };
 // registered only when that service exists.
 export const inject = [];
 
-const DEFAULT_ENDPOINT = "https://www.workbuddy.ai";
+/** 两个官方入口。token 与入口绑定：国内 token 在国际入口会被拒，反之亦然。 */
+const AI_ENDPOINT = "https://www.workbuddy.ai";
+const CN_ENDPOINT = "https://www.workbuddy.cn";
+const DEFAULT_ENDPOINT = AI_ENDPOINT;
 const STREAM_PATH = "/clientcap/v2/asr/stream";
 const FRAME_BYTES = 3200; // 16 kHz * 2 bytes * 0.1 s
 
@@ -63,23 +70,193 @@ function readTokenFile(path) {
   }
 }
 
-function loadToken(config) {
+function readWholeFile(path) {
+  try {
+    const text = readFileSync(path, "utf8");
+    return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  } catch {
+    return undefined;
+  }
+}
+
+function readJsonFile(path) {
+  const text = readWholeFile(path);
+  if (text === undefined) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** 这个入口属于哪条线路；判不出来按国际版算。 */
+function regionOf(endpoint) {
+  try {
+    const host = new URL(String(endpoint)).hostname.toLowerCase();
+    if (host === "workbuddy.cn" || host.endsWith(".workbuddy.cn")) return "cn";
+    if (host === "codebuddy.cn" || host.endsWith(".codebuddy.cn")) return "cn";
+    return "ai";
+  } catch {
+    return "ai";
+  }
+}
+
+/** 实际入口：region 明确写了就以它为准，否则用 endpoint。 */
+function resolveEndpoint(config) {
+  const region = String(field(config, "region", "auto")).trim().toLowerCase();
+  if (region === "cn") return CN_ENDPOINT;
+  if (region === "ai") return AI_ENDPOINT;
+  return String(field(config, "endpoint", DEFAULT_ENDPOINT));
+}
+
+/**
+ * 本机已登录账号所在的文件。
+ *
+ * 桌面客户端同一时间只保留当前登录账号，所以本机装过 xdpool 的话，它把各账号的
+ * access_token 攒在 `~/.dsh/.xdpool/accounts.json`；wb-switch 另有 `~/.wb-switch`。
+ * 全部只读，不写回。
+ */
+function accountPoolPaths() {
+  const home = homedir();
+  const paths = [];
+  const custom = process.env.WORKBUDDY_ASR_ACCOUNTS?.trim();
+  if (custom) paths.push(custom);
+  const keyDir = process.env.WORKBUDDY_ASR_KEY_DIR?.trim();
+  if (keyDir) paths.push(join(keyDir, "wb-asr-tokens.json"));
+  paths.push(join(home, ".dsh", ".xdpool", "accounts.json"));
+  paths.push(join(home, ".wb-switch", "accounts.json"));
+  paths.push(join(home, ".dsh", "skills", "wb-asr", "tokens.json"));
+  paths.push(join(home, ".workbuddy", "skills", "wb-asr", "tokens.json"));
+  return paths;
+}
+
+/** 客户端自报的当前登录账号，只用于排序，不参与鉴权。 */
+function localSignedIn() {
+  const home = homedir();
+  const found = [];
+  for (const dir of [".workbuddy", ".workbuddy-ai"]) {
+    const snapshot = readJsonFile(join(home, dir, "storage", "skeleton", "account-snapshot.json"));
+    const primary = snapshot?.primary;
+    if (primary && typeof primary.uid === "string" && primary.uid) found.push(primary.uid);
+  }
+  return found;
+}
+
+/** 一个账号记录可能是 xdpool 的 {credential}、wb-switch 的扁平写法，或技能目录的写法。 */
+function normalizeAccount(raw, source) {
+  const box = raw && typeof raw === "object" && raw.credential && typeof raw.credential === "object" ? raw.credential : raw;
+  const token = typeof box?.accessToken === "string" ? box.accessToken.trim()
+    : typeof box?.access_token === "string" ? box.access_token.trim()
+      : "";
+  if (!token) return undefined;
+  const variant = String(raw?.variant ?? "").toLowerCase();
+  const domain = typeof box?.domain === "string" && box.domain ? "https://" + box.domain : "";
+  return {
+    token,
+    region: variant === "ai" || variant === "cn" ? variant : regionOf(domain || AI_ENDPOINT),
+    uid: typeof box?.uid === "string" ? box.uid : "",
+    expiresAt: Number(box?.expiresAtMs ?? box?.expiresAt) || 0,
+    needsRelogin: raw?.needs_relogin === true,
+    source,
+  };
+}
+
+/** 本机能拿到的全部账号（不含 token.txt 兜底）。 */
+function discoverAccounts() {
+  const accounts = [];
+  const seen = new Set();
+  for (const path of accountPoolPaths()) {
+    const parsed = readJsonFile(path);
+    if (parsed === undefined) continue;
+    const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.accounts) ? parsed.accounts : [];
+    for (const raw of list) {
+      const account = normalizeAccount(raw, path);
+      if (!account || seen.has(account.token)) continue;
+      seen.add(account.token);
+      accounts.push(account);
+    }
+  }
+  return accounts;
+}
+
+/**
+ * 按尝试顺序给出 token。
+ *
+ * 第一轮只用跟当前入口同线路的账号（跨线路的 token 一定被拒，先试纯属浪费一次
+ * 请求）；第二轮才把其它线路的也排上，用于 region 填 auto 但 endpoint 判错的场合。
+ * label 只写来源序号，不写昵称或 uid。
+ */
+function tokenCandidates(config) {
+  const region = regionOf(resolveEndpoint(config));
+  const candidates = [];
+  const seen = new Set();
+  const push = (token, label) => {
+    const value = typeof token === "string" ? token.trim() : "";
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    candidates.push({ token: value, label: label ?? "pool-" + (candidates.length + 1) });
+  };
+
   const fromEnv = process.env.WORKBUDDY_ASR_TOKEN?.trim();
-  if (fromEnv) return fromEnv;
-  if (typeof config.token === "string" && config.token.trim()) return config.token.trim();
-  const skillDir = config.skillDir
+  if (fromEnv) push(fromEnv, "env");
+  if (typeof config?.token === "string") push(config.token, "config");
+
+  if (field(config, "accountPool", true) !== false) {
+    const signedIn = localSignedIn();
+    const now = Date.now();
+    const ranked = discoverAccounts()
+      .filter((account) => !account.needsRelogin)
+      .map((account) => ({
+        account,
+        sameRegion: account.region === region,
+        expired: account.expiresAt > 0 && account.expiresAt <= now,
+        current: account.uid !== "" && signedIn.includes(account.uid),
+      }))
+      .sort((a, b) => {
+        if (a.sameRegion !== b.sameRegion) return a.sameRegion ? -1 : 1;
+        if (a.current !== b.current) return a.current ? -1 : 1;
+        if (a.expired !== b.expired) return a.expired ? 1 : -1;
+        return b.account.expiresAt - a.account.expiresAt;
+      });
+    for (const entry of ranked) push(entry.account.token);
+  }
+
+  const skillDir = config?.skillDir
     || process.env.WORKBUDDY_ASR_SKILL_DIR
     || join(homedir(), ".dsh", "skills", "wb-asr");
   const keyDir = process.env.WORKBUDDY_ASR_KEY_DIR
     || join(homedir(), ".workbuddy-asr");
-  for (const candidate of [join(skillDir, "token.txt"), join(keyDir, "wb-asr-token.txt")]) {
-    const token = readTokenFile(candidate);
-    if (token) return token;
+  for (const file of [join(skillDir, "token.txt"), join(keyDir, "wb-asr-token.txt")]) {
+    const token = readTokenFile(file);
+    if (token) push(token, "file");
   }
-  throw new Error(
-    "wb-asr: 缺少 token。请把 WorkBuddy access_token 写进 " + join(skillDir, "token.txt")
-    + " 第一行，或设置环境变量 WORKBUDDY_ASR_TOKEN。",
-  );
+  return candidates;
+}
+
+/**
+ * 用第一个能握手的账号识别；401/403 换下一个账号再试。
+ *
+ * 认证失败以外的错误（网络、音频格式、服务端 5xx）直接抛出，不在账号间重试。
+ */
+async function transcribeWithPool(run, config) {
+  const candidates = tokenCandidates(config);
+  if (candidates.length === 0) {
+    throw new Error(
+      "wb-asr: 没有可用的 WorkBuddy 账号。请在桌面客户端登录任意账号，或设置环境变量 WORKBUDDY_ASR_TOKEN。",
+    );
+  }
+  let lastError;
+  for (const candidate of candidates) {
+    try {
+      return await run(candidate.token);
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      const authFailure = /401|403|Authorization Required|握手失败|invalid or expired JWT/i.test(message);
+      if (!authFailure) throw error;
+    }
+  }
+  throw lastError;
 }
 
 /* -------------------------------------------------------------------- WAV */
@@ -545,7 +722,16 @@ function registerRoutes(ctx, { getConfig }) {
       handler: async (req, res) => {
         if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
         if (!loopbackOrigin(req)) return sendJson(res, 403, { error: "origin-not-trusted" });
-        sendJson(res, 200, { ok: true, provider: "wb-asr-cloud", endpoint: field(getConfig(), "endpoint", DEFAULT_ENDPOINT), streaming: true });
+        const live = getConfig();
+        const endpoint = resolveEndpoint(live);
+        sendJson(res, 200, {
+          ok: true,
+          provider: "wb-asr-cloud",
+          endpoint,
+          region: regionOf(endpoint),
+          streaming: true,
+          accounts: tokenCandidates(live).length,
+        });
       },
     });
 
@@ -574,12 +760,16 @@ function registerRoutes(ctx, { getConfig }) {
         req.on("error", (error) => queue.fail(error));
         try {
           const live = getConfig();
-          const result = await recognizeStream(queue, {
-            token: loadToken(live),
-            endpoint: field(live, "endpoint", DEFAULT_ENDPOINT),
-            timeoutMs: Number(field(live, "timeoutMs", 30000)) + SESSION_MAX_MS,
-            signal: abort.signal,
-          });
+          const endpoint = resolveEndpoint(live);
+          const result = await transcribeWithPool(
+            (token) => recognizeStream(queue, {
+              token,
+              endpoint,
+              timeoutMs: Number(field(live, "timeoutMs", 30000)) + SESSION_MAX_MS,
+              signal: abort.signal,
+            }),
+            live,
+          );
           sendJson(res, 200, {
             text: result.text,
             audioSeconds: result.bytes / 32000,
@@ -610,12 +800,16 @@ function registerRoutes(ctx, { getConfig }) {
           const pcm = wavToPcm(audio);
           const startedAt = Date.now();
           const live = getConfig();
-          const text = await recognize(pcm, {
-            token: loadToken(live),
-            endpoint: field(live, "endpoint", DEFAULT_ENDPOINT),
-            timeoutMs: Number(field(live, "timeoutMs", 30000)),
-            signal: abort.signal,
-          });
+          const endpoint = resolveEndpoint(live);
+          const text = await transcribeWithPool(
+            (token) => recognize(pcm, {
+              token,
+              endpoint,
+              timeoutMs: Number(field(live, "timeoutMs", 30000)),
+              signal: abort.signal,
+            }),
+            live,
+          );
           sendJson(res, 200, {
             text,
             audioSeconds: pcm.length / 32000,
@@ -700,12 +894,16 @@ export function apply(ctx, config = {}) {
         const startedAt = Date.now();
         const pcm = wavToPcm(input.audio);
         const live = getConfig();
-        const text = await recognize(pcm, {
-          token: loadToken(live),
-          endpoint: field(live, "endpoint", DEFAULT_ENDPOINT),
-          timeoutMs: Number(field(live, "timeoutMs", 30000)),
-          signal,
-        });
+        const endpoint = resolveEndpoint(live);
+        const text = await transcribeWithPool(
+          (token) => recognize(pcm, {
+            token,
+            endpoint,
+            timeoutMs: Number(field(live, "timeoutMs", 30000)),
+            signal,
+          }),
+          live,
+        );
         return {
           text,
           audioSeconds: pcm.length / 32000,
