@@ -1,0 +1,26 @@
+{
+  "meta": {
+    "title": "WorkBuddy 语音输入",
+    "description": "用 WorkBuddy 云端识别把输入框里的按住说话变成文字，带扩散光圈反馈。"
+  },
+  "hold": "按住说话（或按住 Alt）",
+  "release": "松开结束",
+  "busy": "正在识别",
+  "empty": "没有识别到内容",
+  "insertFailed": "插入失败：{message}",
+  "insertConflict": "草稿刚被改动，请再说一次",
+  "noMedia": "这个环境不允许使用麦克风",
+  "denied": "麦克风权限被拒绝",
+  "noDevice": "没有找到可用的麦克风",
+  "unreachable": "连不上识别服务：{message}",
+  "badResponse": "识别服务返回了无法解析的结果",
+  "badStatus": "识别服务返回 {status}",
+  "settingsLoading": "正在读取设置…",
+  "settingsSaving": "正在保存…",
+  "settingsSaved": "已保存",
+  "settingsFailed": "保存失败（{status}）",
+  "fieldMinHold": "最短录音",
+  "fieldEffect": "扩散光圈",
+  "fieldColor": "光圈颜色",
+  "unitMs": "毫秒"
+}

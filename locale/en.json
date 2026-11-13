@@ -1,0 +1,26 @@
+{
+  "meta": {
+    "title": "WorkBuddy voice input",
+    "description": "Turns hold-to-talk in the composer into text with the WorkBuddy cloud recognizer, with diffusion rings while recording."
+  },
+  "hold": "Hold to talk (or hold Alt)",
+  "release": "Release to stop",
+  "busy": "Recognizing",
+  "empty": "Nothing was recognized",
+  "insertFailed": "Could not insert: {message}",
+  "insertConflict": "The draft changed, please say it again",
+  "noMedia": "This environment does not allow microphone access",
+  "denied": "Microphone permission was denied",
+  "noDevice": "No microphone was found",
+  "unreachable": "Cannot reach the recognizer: {message}",
+  "badResponse": "The recognizer returned an unreadable response",
+  "badStatus": "The recognizer returned {status}",
+  "settingsLoading": "Reading settings…",
+  "settingsSaving": "Saving…",
+  "settingsSaved": "Saved",
+  "settingsFailed": "Could not save ({status})",
+  "fieldMinHold": "Minimum take",
+  "fieldEffect": "Diffusion rings",
+  "fieldColor": "Ring colour",
+  "unitMs": "ms"
+}

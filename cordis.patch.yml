@@ -1,0 +1,25 @@
+- insert:
+    - id: voice-input-wb-asr
+      name: dsh-voice-input-wb-asr
+
+# Keep the shipped recognition registry and its remote, but point the default
+# provider at the WorkBuddy cloud recognizer instead of the local SenseVoice
+# model. This overrides the shipped row; it does not add a second one.
+- id: speech-to-text
+  name: '@deepseek-ai/dsh-experimental-speech-to-text'
+  config:
+    defaultProvider: wb-asr-cloud
+    language: auto
+
+# Turn off only the shipped microphone UI. Its click-to-start / click-to-stop
+# control would sit next to this bundle's hold-to-talk button, and the composer
+# should carry one microphone, not two.
+- id: ui-voice-input
+  name: '@deepseek-ai/dsh-experimental-client-ui-voice-input'
+  disabled: true
+
+# The local recognizer downloads ~1 GB of model files on first use and the cloud
+# provider replaces it.
+- id: speech-to-text-sensevoice
+  name: '@deepseek-ai/dsh-experimental-speech-to-text-sensevoice'
+  disabled: true

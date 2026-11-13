@@ -1,0 +1,9 @@
+node_modules/
+*.log
+
+# credentials — never commit
+token.txt
+tokens.json
+wb-asr-token.txt
+wb-asr-tokens.json
+.env

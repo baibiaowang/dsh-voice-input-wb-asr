@@ -1,0 +1,51 @@
+{
+  "name": "dsh-voice-input-wb-asr",
+  "version": "0.4.0",
+  "description": "WorkBuddy (wb-asr) cloud recognition for dsh, plus a hold-to-talk microphone in the composer (pointer, or Alt while the caret is in the composer)",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["dsh", "dsh-plugin", "voice", "speech-to-text", "asr", "workbuddy", "microphone"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baibiaowang/dsh-voice-input-wb-asr.git"
+  },
+  "homepage": "https://github.com/baibiaowang/dsh-voice-input-wb-asr#readme",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "test-resolve.mjs",
+    "test-stream.mjs",
+    "test-standalone.mjs",
+    "test-client-alt.mjs"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}
