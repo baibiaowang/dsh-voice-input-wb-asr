@@ -1,6 +1,6 @@
 // Drive the Host half's press-to-talk routes without a dsh runtime.
 //
-//   node test-stream.mjs <wav16k>
+//   node --import ./test-shim.mjs test-stream.mjs <wav16k> [ai|cn]
 //
 // Mocks ctx.effect / ctx.inject / ctx.webServer / ctx.speechToText, feeds the
 // WAV's PCM into the /stream route as chunked request bodies, and prints the
@@ -10,6 +10,8 @@ import { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
 
 const wav = readFileSync(process.argv[2] ?? "tts-test-16k.wav");
+// Optional second argument picks the build: ai (default) or cn.
+const region = process.argv[3] === "cn" ? "cn" : "ai";
 
 /** PCM body of a canonical 16 kHz / 16-bit / mono WAV. */
 function wavPcm(buf) {
@@ -62,7 +64,7 @@ const ctx = {
 const plugin = await import("./index.js");
 console.log("module name =", plugin.name);
 console.log("inject =", JSON.stringify(plugin.inject));
-plugin.apply(ctx, {});
+plugin.apply(ctx, { activeRegion: region });
 
 console.log("provider.info =", JSON.stringify(provider.info));
 console.log("routes =", [...routes.keys()].join(", "));
