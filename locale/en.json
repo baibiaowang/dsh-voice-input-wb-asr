@@ -22,5 +22,12 @@
   "fieldMinHold": "Minimum take",
   "fieldEffect": "Diffusion rings",
   "fieldColor": "Ring colour",
-  "unitMs": "ms"
+  "unitMs": "ms",
+  "fieldRegion": "Recognizer region",
+  "fieldEnableCn": "Enable domestic build",
+  "regionAi": "International (workbuddy.ai)",
+  "regionCn": "Domestic (workbuddy.cn)",
+  "regionHint": "International by default. The domestic build has to be enabled here first; until then nothing contacts the domestic service and its accounts are ignored.",
+  "regionCnOff": "domestic build not enabled",
+  "accounts": "{count} accounts available"
 }

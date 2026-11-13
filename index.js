@@ -30,12 +30,16 @@ export const name = "voice-input-wb-asr";
  * running plugin instead of restarting it, which is what makes the microphone
  * usable straight after a change. */
 const Config = z.object({
-  region: z.string().default("auto")
-    .description("线路：auto 用下面的地址；ai 国际版 www.workbuddy.ai；cn 国内版 www.workbuddy.cn。").volatile(),
+  enableCn: z.boolean().default(false)
+    .description("启用国内版（www.workbuddy.cn）。关闭时只用国际版，本机的国内版账号一律不参与识别。").volatile(),
+  activeRegion: z.string().default("ai")
+    .description("当前线路：ai 国际版，cn 国内版。国内版要先在上面启用，否则即使选了 cn 也仍然走国际版。").volatile(),
   accountPool: z.boolean().default(true)
-    .description("自动读取本机已登录的 WorkBuddy 账号（~/.wb-switch/accounts.json 与 wb-asr 技能目录），按线路挑账号，握手被拒自动换下一个。").volatile(),
-  endpoint: z.string().default("https://www.workbuddy.ai")
-    .description("识别服务地址。region 填了 ai/cn 时以 region 为准；只有改用自建网关才需要改这里。").volatile(),
+    .description("自动读取本机已登录的 WorkBuddy 账号，按线路挑账号，握手被拒自动换下一个。").volatile(),
+  aiEndpoint: z.string().default("https://www.workbuddy.ai")
+    .description("国际版识别服务地址。只有改用自建网关时才需要修改。").volatile(),
+  cnEndpoint: z.string().default("https://www.workbuddy.cn")
+    .description("国内版识别服务地址。只有改用自建网关时才需要修改。").volatile(),
   timeoutMs: z.number().step(1000).min(3000).max(300000).default(30000)
     .description("单次识别的超时时间（毫秒）。网络慢时可以调大。").volatile(),
   minHoldMs: z.number().step(10).min(0).max(2000).default(320)
@@ -101,12 +105,22 @@ function regionOf(endpoint) {
   }
 }
 
-/** 实际入口：region 明确写了就以它为准，否则用 endpoint。 */
+/**
+ * 当前生效的线路。
+ *
+ * 国内版是可选功能：没打开 `enableCn` 时一律按国际版处理，即使 `activeRegion`
+ * 写着 cn 也不松口——这样默认安装永远不会因为本机存着国内账号而偷偷走国内入口。
+ */
+function activeRegion(config) {
+  const wanted = String(field(config, "activeRegion", "ai")).trim().toLowerCase();
+  if (wanted !== "cn") return "ai";
+  return field(config, "enableCn", false) === true ? "cn" : "ai";
+}
+
+/** 该线路的识别入口。 */
 function resolveEndpoint(config) {
-  const region = String(field(config, "region", "auto")).trim().toLowerCase();
-  if (region === "cn") return CN_ENDPOINT;
-  if (region === "ai") return AI_ENDPOINT;
-  return String(field(config, "endpoint", DEFAULT_ENDPOINT));
+  if (activeRegion(config) === "cn") return String(field(config, "cnEndpoint", CN_ENDPOINT));
+  return String(field(config, "aiEndpoint", AI_ENDPOINT));
 }
 
 /**
@@ -182,12 +196,13 @@ function discoverAccounts() {
 /**
  * 按尝试顺序给出 token。
  *
- * 第一轮只用跟当前入口同线路的账号（跨线路的 token 一定被拒，先试纯属浪费一次
- * 请求）；第二轮才把其它线路的也排上，用于 region 填 auto 但 endpoint 判错的场合。
- * label 只写来源序号，不写昵称或 uid。
+ * 只给当前线路的账号：跨线路的 token 一定被拒，排上它只是白花一次请求。国内版
+ * 没启用时，本机的国内账号完全不列进来——默认安装就该只碰国际版。同线路里，
+ * 桌面客户端当前登录的排前面，然后按过期时间从近到远。label 只写来源序号，不写
+ * 昵称或 uid。
  */
 function tokenCandidates(config) {
-  const region = regionOf(resolveEndpoint(config));
+  const region = activeRegion(config);
   const candidates = [];
   const seen = new Set();
   const push = (token, label) => {
@@ -206,14 +221,13 @@ function tokenCandidates(config) {
     const now = Date.now();
     const ranked = discoverAccounts()
       .filter((account) => !account.needsRelogin)
+      .filter((account) => account.region === region)
       .map((account) => ({
         account,
-        sameRegion: account.region === region,
         expired: account.expiresAt > 0 && account.expiresAt <= now,
         current: account.uid !== "" && signedIn.includes(account.uid),
       }))
       .sort((a, b) => {
-        if (a.sameRegion !== b.sameRegion) return a.sameRegion ? -1 : 1;
         if (a.current !== b.current) return a.current ? -1 : 1;
         if (a.expired !== b.expired) return a.expired ? 1 : -1;
         return b.account.expiresAt - a.account.expiresAt;
@@ -635,13 +649,17 @@ function field(config, key, fallback) {
 
 /** The subset of the configuration the Client needs; the token never leaves. */
 function clientSettings(config) {
-  const endpoint = field(config, "endpoint", DEFAULT_ENDPOINT);
+  const endpoint = resolveEndpoint(config);
   const timeoutMs = Number(field(config, "timeoutMs", 30000));
   const minHoldMs = Number(field(config, "minHoldMs", 320));
   const effect = field(config, "effect", true);
   const ringColor = field(config, "ringColor", "#00ff9d");
+  const accounts = tokenCandidates(config).length;
   return {
     endpoint: String(endpoint),
+    region: activeRegion(config),
+    enableCn: field(config, "enableCn", false) === true,
+    accounts,
     timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 30000,
     minHoldMs: Number.isFinite(minHoldMs) ? minHoldMs : 320,
     effect: effect !== false,
@@ -707,6 +725,19 @@ function registerRoutes(ctx, { getConfig }) {
           if (body && typeof body.minHoldMs === "number") patch.minHoldMs = body.minHoldMs;
           if (body && typeof body.effect === "boolean") patch.effect = body.effect;
           if (body && typeof body.ringColor === "string") patch.ringColor = body.ringColor;
+          if (body && typeof body.enableCn === "boolean") {
+            patch.enableCn = body.enableCn;
+            // Turning the domestic build off must not leave the switch pointing at
+            // an endpoint that is no longer allowed; fall back to the default build.
+            if (body.enableCn === false) patch.activeRegion = "ai";
+          }
+          if (body && (body.activeRegion === "ai" || body.activeRegion === "cn")) {
+            const live = getConfig();
+            if (body.activeRegion === "cn" && field(live, "enableCn", false) !== true) {
+              return sendJson(res, 400, { error: "cn-not-enabled" });
+            }
+            patch.activeRegion = body.activeRegion;
+          }
           if (Object.keys(patch).length === 0) return sendJson(res, 400, { error: "no known field" });
           await saveSettings(ctx, patch);
           sendJson(res, 200, { values: clientSettings(getConfig()) });
@@ -728,7 +759,8 @@ function registerRoutes(ctx, { getConfig }) {
           ok: true,
           provider: "wb-asr-cloud",
           endpoint,
-          region: regionOf(endpoint),
+          region: activeRegion(live),
+          enableCn: field(live, "enableCn", false) === true,
           streaming: true,
           accounts: tokenCandidates(live).length,
         });

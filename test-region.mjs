@@ -62,7 +62,7 @@ const ctx = {
 const plugin = await import("./index.js");
 console.log("module name =", plugin.name);
 console.log("inject =", JSON.stringify(plugin.inject));
-plugin.apply(ctx, process.env.TEST_REGION === "cn" ? { region: "cn" } : {});
+plugin.apply(ctx, process.env.TEST_REGION === "cn" ? { enableCn: true, activeRegion: "cn" } : {});
 
 console.log("provider.info =", JSON.stringify(provider.info));
 console.log("routes =", [...routes.keys()].join(", "));

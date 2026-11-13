@@ -12,7 +12,7 @@ Recognition runs on the WorkBuddy cloud ASR service, so no local model is downlo
 - **Streams while you hold**: raw 16 kHz / 16-bit / mono PCM is pushed to the host half as you speak, so releasing the button only waits for the last syllable instead of the whole clip.
 - **Registers as a provider** for the shipped speech-to-text service when that service is mounted, so a profile that keeps the click-to-start microphone still works. Where it does, the shipped microphone button is disabled so the composer carries one microphone, not two.
 - **Uses the accounts already signed in on this machine.** Tokens are read from the local WorkBuddy account stores; when one is rejected the next account is tried, so a stale token does not break the button.
-- **International and domestic builds.** The region decides the endpoint: `www.workbuddy.ai` for the international build, `www.workbuddy.cn` for the domestic one. A token only works on its own region, and the account pool records which one each token belongs to.
+- **International and domestic builds, kept apart.** The region decides the endpoint: `www.workbuddy.ai` for the international build, `www.workbuddy.cn` for the domestic one. International is the default and is the only one that runs until the domestic build is switched on in settings. A token only works on its own region, and the account pool records which one each token belongs to.
 - **No dependencies outside Node built-ins**: the WebSocket client and the RIFF/WAVE reader are part of the plugin.
 
 ## Requirements
@@ -53,9 +53,11 @@ To use a token that is not on this machine, set `WORKBUDDY_ASR_TOKEN` — it is 
 
 | Field | Default | Meaning |
 |---|---|---|
-| `region` | `auto` | `auto` uses the endpoint below; `ai` forces `www.workbuddy.ai`; `cn` forces `www.workbuddy.cn`. |
+| `enableCn` | `false` | Switch the domestic build on. While it is off nothing contacts `workbuddy.cn` and domestic accounts are left out of the pool. |
+| `activeRegion` | `ai` | `ai` international, `cn` domestic. Selecting `cn` while `enableCn` is off is refused. |
 | `accountPool` | `true` | Read the accounts signed in on this machine and fail over between them. |
-| `endpoint` | `https://www.workbuddy.ai` | Recognizer base URL, used when `region` is `auto`; only change it for a self-hosted gateway. |
+| `aiEndpoint` | `https://www.workbuddy.ai` | International recognizer base URL; only change it for a self-hosted gateway. |
+| `cnEndpoint` | `https://www.workbuddy.cn` | Domestic recognizer base URL; only change it for a self-hosted gateway. |
 | `timeoutMs` | `30000` | Per-request timeout. Raise it on a slow network. |
 | `minHoldMs` | `320` | Presses shorter than this are treated as a mis-tap and are not uploaded. |
 | `effect` | `true` | Show diffusion rings while recording. |
@@ -73,7 +75,8 @@ Every field is volatile: an edit applies to the running plugin without a restart
 ## Notes and limitations
 
 - The ASR protocol is unofficial — reverse engineered from the WorkBuddy web client, the same protocol the `wb-asr` skill speaks. It can break when the service changes.
-- A token belongs to one region: a domestic account fails on the international endpoint and vice versa. Leave `region` on `auto` unless the machine has accounts from both builds and the automatic choice is wrong.
+- A token belongs to one region: a domestic account fails on the international endpoint and vice versa. That is why the two builds are separate settings rather than one automatic choice — the plugin never contacts the domestic service unless you switch it on.
+- Switching the domestic build off also moves the active region back to international, so the plugin cannot be left pointing at a disabled endpoint.
 - The pool has no rate-limit awareness: it fails over on rejection, but it does not rotate between takes.
 - Chinese and English recognition quality depends on the service, not on this plugin.
 - No wake word, no continuous dictation: it is push-to-talk only.
