@@ -66,9 +66,8 @@ Every field is volatile: an edit applies to the running plugin without a restart
 
 ## Privacy
 
-- Audio leaves your machine: the recording is streamed to the WorkBuddy endpoint selected by `region`.
+- Audio leaves your machine: the recording is streamed to the WorkBuddy endpoint selected by `activeRegion`.
 - Tokens are read from your own account files and stay in the host half: they are never sent to the browser, and the plugin writes nothing back.
-- The token stays on the host: it is never sent to the browser half.
 - Nothing is stored on disk by the plugin; there is no transcript history.
 
 ## Notes and limitations
