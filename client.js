@@ -268,6 +268,38 @@ window.__ModuleLoader__.load({
       return '…' + text.slice(text.length - limit);
     }
 
+    /**
+     * Live dictation, written straight into the composer.
+     *
+     * The Host's composer keeps a rich-text draft, and the only whole-text
+     * write it offers is setDraft. A take therefore remembers the text it
+     * found, rewrites the draft as that text plus the line being recognized,
+     * and swaps the line for the settled sentence at the end. Chips (mentions,
+     * quotes) do not survive a whole-draft write, so such takes fall back to
+     * the plain insert path.
+     */
+    function draftWriter(actions, shell) {
+      if (actions === null || actions === undefined) return null;
+      if (typeof actions.setDraft !== 'function') return null;
+      var projection = shell === null || shell === undefined ? undefined : shell.projection;
+      if (projection === null || projection === undefined) return null;
+      if (projection.quotes !== undefined && projection.quotes !== null && projection.quotes.length > 0) return null;
+      if (projection.occurrences !== undefined && projection.occurrences !== null && projection.occurrences.length > 0) return null;
+      var base = typeof projection.clipboardText === 'string' ? projection.clipboardText : '';
+      var separator = base !== '' && !/[\s]$/.test(base) ? '\n' : '';
+      var current = base;
+      return {
+        /** Replace the line under dictation; an empty string takes it back out. */
+        text: function text(next) {
+          var whole = next === '' ? base : base + separator + next;
+          if (whole === current) return;
+          current = whole;
+          try {
+            actions.setDraft(whole);
+          } catch (ignored) { /* the draft moved on; leave it alone */ }
+        },
+      };
+    }
     /** Mark a failure that a retry can plausibly fix (transport, not verdict). */
     function retryable(error) {
       error.retryable = true;
@@ -613,6 +645,8 @@ window.__ModuleLoader__.load({
 
     function HoldToTalk(props) {
       var inputActions = props.inputActions;
+      // The Host's composer shell: where the live draft is read and written.
+      var shell = props.keyboard;
       var phaseState = React.useState('idle');
       var phase = phaseState[0];
       var setPhase = phaseState[1];
@@ -699,9 +733,13 @@ window.__ModuleLoader__.load({
           return;
         }
         moveTo('idle');
-        // The settled text replaces the preview in one insert: the recognizer
+        // The settled text replaces the preview in one write: the recognizer
         // revises its tail, so the preview is never what gets written.
         setPreview(null);
+        if (session.writer !== null) {
+          session.writer.text(text === null ? '' : text);
+          return;
+        }
         if (text === null) return; // accidental tap
         insert(text);
       }
@@ -735,11 +773,17 @@ window.__ModuleLoader__.load({
           setSettings(next);
         });
         var session = createSession();
+        session.writer = draftWriter(inputActions, shell);
         session.minHoldMs = fromKey === true
           ? Math.min(ALT_MIN_HOLD_MS, settingsRef.current.minHoldMs)
           : settingsRef.current.minHoldMs;
         session.onLimit = function onLimit() { releaseFromLimit(session); };
         session.onPartial = function onPartial(text) {
+          // The composer is the preview: each sentence lands where it will stay.
+          if (session.writer !== null) {
+            session.writer.text(text);
+            return;
+          }
           var rect = buttonRef.current ? buttonRef.current.getBoundingClientRect() : null;
           if (rect !== null) {
             previewAtRef.current = {
@@ -790,6 +834,7 @@ window.__ModuleLoader__.load({
         sessionRef.current = null;
         if (session === null) return;
         session.abort();
+        if (session.writer !== null) session.writer.text('');
         setPreview(null);
         moveTo('idle');
       }
