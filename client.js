@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
     var ROUTE = '/plugins/dsh-voice-input-wb-asr/stream';
     var CONFIG_ROUTE = '/plugins/dsh-voice-input-wb-asr/config';
     var TRACE_ROUTE = '/plugins/dsh-voice-input-wb-asr/trace';
-    var VERSION = '0.9.2';
+    var VERSION = '0.9.3';
     var SLOT = 'conversation.input.right';
     var TARGET_RATE = 16000;
     // Below this the user tapped instead of speaking; nothing is uploaded.
@@ -286,6 +286,39 @@ window.__ModuleLoader__.load({
       return '…' + text.slice(text.length - limit);
     }
 
+    /** The composer's editable: Lexical marks the element it renders into. */
+    function composerEditor() {
+      try {
+        if (typeof document.querySelectorAll !== 'function') return null;
+        var nodes = document.querySelectorAll('[data-lexical-editor="true"]');
+        for (var index = 0; index < nodes.length; index += 1) {
+          if (nodes[index].offsetParent !== null) return nodes[index];
+        }
+        return nodes.length > 0 ? nodes[0] : null;
+      } catch (ignored) {
+        return null;
+      }
+    }
+
+    /** The draft as plain lines; null when the composer cannot be read. */
+    function composerDraft() {
+      var editor = composerEditor();
+      if (editor === null) return null;
+      var raw = typeof editor.innerText === 'string' ? editor.innerText : String(editor.textContent || '');
+      return raw.replace(/\u00a0/g, ' ').replace(/\n+$/, '');
+    }
+
+    /** Chips (mentions, quotes, files) do not survive a whole-draft write. */
+    function composerHasChips() {
+      var editor = composerEditor();
+      if (editor === null) return false;
+      try {
+        return editor.querySelector('[data-lexical-decorator="true"]') !== null;
+      } catch (ignored) {
+        return false;
+      }
+    }
+
     /**
      * Live dictation, written straight into the composer.
      *
@@ -300,13 +333,24 @@ window.__ModuleLoader__.load({
       if (actions === null || actions === undefined) return null;
       if (typeof actions.setDraft !== 'function') return null;
       var projection = shell === null || shell === undefined ? undefined : shell.projection;
-      if (projection === null || projection === undefined) return null;
-      if (projection.quotes !== undefined && projection.quotes !== null && projection.quotes.length > 0) return null;
-      if (projection.occurrences !== undefined && projection.occurrences !== null && projection.occurrences.length > 0) return null;
-      var base = typeof projection.clipboardText === 'string' ? projection.clipboardText : '';
+      var source = 'page';
+      var base;
+      if (projection === null || projection === undefined) {
+        // The slot is handed the composer's actions but not its keyboard, so the
+        // text already in the box is read from the page instead.
+        if (composerHasChips()) return null;
+        base = composerDraft();
+        if (base === null) return null;
+      } else {
+        if (projection.quotes !== undefined && projection.quotes !== null && projection.quotes.length > 0) return null;
+        if (projection.occurrences !== undefined && projection.occurrences !== null && projection.occurrences.length > 0) return null;
+        base = typeof projection.clipboardText === 'string' ? projection.clipboardText : '';
+        source = 'keyboard';
+      }
       var separator = base !== '' && !/[\s]$/.test(base) ? '\n' : '';
       var current = base;
       return {
+        source: source,
         /** Replace the line under dictation; an empty string takes it back out. */
         text: function text(next) {
           var whole = next === '' ? base : base + separator + next;
@@ -314,7 +358,9 @@ window.__ModuleLoader__.load({
           current = whole;
           try {
             actions.setDraft(whole);
-          } catch (ignored) { /* the draft moved on; leave it alone */ }
+          } catch (cause) {
+            report('write-fail', { message: messageOf(cause) });
+          }
         },
       };
     }
@@ -818,6 +864,7 @@ window.__ModuleLoader__.load({
           keyboard: shell === undefined ? 'absent' : 'present',
           setDraft: inputActions && typeof inputActions.setDraft === 'function' ? 'yes' : 'no',
           writer: session.writer === null ? 'off' : 'on',
+          draft: session.writer === null ? 'none' : session.writer.source,
         });
         session.minHoldMs = fromKey === true
           ? Math.min(ALT_MIN_HOLD_MS, settingsRef.current.minHoldMs)

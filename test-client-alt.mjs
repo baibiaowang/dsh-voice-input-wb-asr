@@ -148,6 +148,12 @@ const documentStub = {
   documentElement: { id: "html" },
   // The caret starts in the editor, which is the normal dictation position.
   activeElement: editor,
+  // The page-rendered composer, for the path where the slot gets no keyboard.
+  pageEditor: null,
+  querySelectorAll(selector) {
+    if (this.pageEditor === null || String(selector).indexOf("data-lexical-editor") === -1) return [];
+    return [this.pageEditor];
+  },
 };
 
 let audioHandler = null;
@@ -439,6 +445,42 @@ if (drafts.length < 2 || drafts[drafts.length - 1] !== "这是一段语音识别
   console.log("FAIL: the settled sentence never reached the composer");
   process.exit(1);
 }
+/* --- case 10: no keyboard in the slot, so the draft comes from the page --- */
+// The Host injects inputActions but not the input shell, which is what a real
+// take hit; the composer then has to be read from the page and rewritten.
+const pageDrafts = [];
+const pageActions = {
+  captureInsertion: () => ({ span: "fake" }),
+  insertText: (text) => { inserted.push({ text }); return true; },
+  setDraft: (text) => { pageDrafts.push(text); },
+};
+documentStub.pageEditor = { offsetParent: {}, innerText: "旧草稿", querySelector: () => null };
+reset();
+let pageStreams = 0;
+deferredStream = Promise.resolve(sseResponse([
+  { text: "第一句" },
+  { text: "第一句第二句", final: true },
+]));
+tree = runtime.render(HoldToTalk, { inputActions: pageActions });
+documentStub.activeElement = buttonNode;
+dispatch("keydown", { key: "Alt", repeat: false, isComposing: false, preventDefault() {} });
+await arm();
+say();
+say();
+await speak();
+await settle();
+const pageEarly = pageDrafts.length;
+dispatch("keyup", { key: "Alt" });
+await settle();
+await settle();
+await settle();
+documentStub.pageEditor = null;
+console.log("case10 page draft -> early", pageEarly, "| drafts", JSON.stringify(pageDrafts));
+if (pageEarly === 0 || pageDrafts[pageDrafts.length - 1] !== "旧草稿\n第一句第二句") {
+  console.log("FAIL: the page draft was not rewritten with the settled text");
+  process.exit(1);
+}
+
 /* --- the request must ask for events, or the host answers only on release */
 const posts = fetchCalls.filter((call) => call.init?.method === "POST" && String(call.url).indexOf("/stream") !== -1);
 const traces = fetchCalls.filter((call) => String(call.url).indexOf("/trace") !== -1);
