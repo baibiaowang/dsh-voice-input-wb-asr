@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
     var ROUTE = '/plugins/dsh-voice-input-wb-asr/stream';
     var CONFIG_ROUTE = '/plugins/dsh-voice-input-wb-asr/config';
     var TRACE_ROUTE = '/plugins/dsh-voice-input-wb-asr/trace';
-    var VERSION = '0.9.1';
+    var VERSION = '0.9.2';
     var SLOT = 'conversation.input.right';
     var TARGET_RATE = 16000;
     // Below this the user tapped instead of speaking; nothing is uploaded.
@@ -439,6 +439,10 @@ window.__ModuleLoader__.load({
         onPartial: undefined,
         controller: undefined,
         request: undefined,
+        // The reply is read from the first byte, not on release: a preview that
+        // waits for the take to end is not a preview.
+        pending: undefined,
+        settled: undefined,
         streamBroken: false,
         aborted: false,
         stopped: false,
@@ -543,7 +547,19 @@ window.__ModuleLoader__.load({
             ...(session.cancel === undefined ? {} : { signal: session.cancel.signal }),
           });
           session.request = request;
-          request.catch(function markBroken() { session.streamBroken = true; });
+          session.pending = readTranscript(request, session.onPartial).then(
+            function settledText(text) {
+              session.settled = { text: text };
+              return text;
+            },
+            function settledError(cause) {
+              session.settled = { cause: cause };
+              throw cause;
+            },
+          );
+          // finish() reads the outcome; this only keeps the rejection from
+          // being reported as unhandled while the button is still held.
+          session.pending.catch(function ignore() {});
         } catch (ignored) {
           session.streamBroken = true;
         }
@@ -600,9 +616,9 @@ window.__ModuleLoader__.load({
           }
           session.controller = undefined;
         }
-        if (!session.streamBroken && session.request !== undefined) {
+        if (!session.streamBroken && session.pending !== undefined) {
           try {
-            return await readTranscript(session.request, session.onPartial);
+            return await session.pending;
           } catch (cause) {
             // The stream can fail at the very moment the button is released —
             // `streamBroken` is set from a promise callback that has not run yet.
@@ -611,6 +627,11 @@ window.__ModuleLoader__.load({
             if (cause === null || cause === undefined || cause.retryable !== true) throw cause;
             session.streamBroken = true;
           }
+        }
+        if (session.pending !== undefined) {
+          // Reading already started, so a second read would hang on the same
+          // body; the caller falls back to the recorded samples instead.
+          session.pending.catch(function ignore() {});
         }
         return postRecording();
       };

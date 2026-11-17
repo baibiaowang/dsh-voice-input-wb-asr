@@ -421,6 +421,15 @@ await arm();
 say();
 say();
 await speak();
+await settle();
+// The reply must be read while the button is still held: a preview that only
+// arrives after the release is invisible during the take.
+const early = drafts.length;
+console.log("case9 preview before release ->", early);
+if (early === 0) {
+  console.log("FAIL: nothing reached the composer while the button was held");
+  process.exit(1);
+}
 dispatch("keyup", { key: "Alt" });
 await settle();
 await settle();
