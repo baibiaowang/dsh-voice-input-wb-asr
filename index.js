@@ -534,8 +534,11 @@ function* framed(pcm) {
  * makes the transcript appear almost immediately.
  *
  * @param chunks - sync or async iterable of 16 kHz / 16-bit / mono PCM buffers.
+ * @param onPartial - called with each interim transcript while the take is open.
+ *   The service revises its tail as it hears more, and only the closing frame is
+ *   authoritative, so this is a preview and never the result.
  */
-async function recognizeStream(chunks, { token, endpoint, timeoutMs, signal }) {
+async function recognizeStream(chunks, { token, endpoint, timeoutMs, signal, onPartial }) {
   const url = new URL(STREAM_PATH, endpoint);
   url.searchParams.set("session_id", randomUUID().replace(/-/g, ""));
   url.searchParams.set("source", "dsh-voice-input-wb-asr");
@@ -576,7 +579,10 @@ async function recognizeStream(chunks, { token, endpoint, timeoutMs, signal }) {
       if (code !== 0 && code !== null && code !== undefined) {
         throw new Error(`wb-asr: 识别服务返回错误 ${code}: ${message?.message ?? message?.msg ?? ""}`);
       }
-      if (typeof message?.text === "string" && message.text) text = message.text;
+      if (typeof message?.text === "string" && message.text) {
+        text = message.text;
+        if (!message.final) onPartial?.(text);
+      }
       if (message?.final) break;
     }
   } finally {
@@ -643,6 +649,155 @@ class ChunkQueue {
       if (this.ended) return;
       await new Promise((resolve) => this.waiters.push(resolve));
     }
+  }
+}
+
+/* ------------------------------------------------------------ live preview */
+
+/**
+ * Frames whose peak stays under this are a pause, not a word. Full scale is
+ * 32768, so 4% is room tone and breath; a soft consonant still clears it.
+ */
+const QUIET_PEAK = Math.round(32768 * 0.04);
+/** 0.3 s of quiet is a phrase boundary; anything shorter sits inside a word. */
+const PAUSE_FRAMES = 3;
+/** A segment shorter than half a second is a click, not worth recognizing. */
+const MIN_SEGMENT_FRAMES = 5;
+
+/** Peak sample of one 16-bit mono frame, sign ignored. */
+function framePeak(frame) {
+  let peak = 0;
+  for (let offset = 0; offset + 1 < frame.length; offset += 2) {
+    const value = frame.readInt16LE(offset);
+    const size = value < 0 ? -value : value;
+    if (size > peak) peak = size;
+  }
+  return peak;
+}
+
+/**
+ * Cut the upload at pauses so a phrase can be recognized while the speaker
+ * keeps talking.
+ *
+ * The cloud recognizer answers only when it decides an utterance has ended or
+ * the stream closes; in continuous speech that is the end of the take, so its
+ * own interim results arrive too late to read while talking. This separates
+ * phrases on our side instead: a pause of 0.3 s closes a segment, the trailing
+ * silence is dropped, and the next phrase starts a new one.
+ */
+class PauseSegmenter {
+  /** Bytes held back until a whole frame has arrived. */
+  #pending = Buffer.alloc(0);
+  /** Frames of the phrase being collected. */
+  #frames = [];
+  /** Consecutive quiet frames at the tail of #frames. */
+  #quiet = 0;
+
+  constructor(onSegment) {
+    this.onSegment = onSegment;
+  }
+
+  push(chunk) {
+    this.#pending = this.#pending.length === 0 ? chunk : Buffer.concat([this.#pending, chunk]);
+    while (this.#pending.length >= FRAME_BYTES) {
+      const frame = Buffer.from(this.#pending.subarray(0, FRAME_BYTES));
+      this.#pending = this.#pending.subarray(FRAME_BYTES);
+      this.#absorb(frame);
+    }
+  }
+
+  /** Flush the last phrase; the client has stopped recording. */
+  finish() {
+    if (this.#pending.length > 0) this.#absorb(Buffer.from(this.#pending));
+    this.#pending = Buffer.alloc(0);
+    if (this.#frames.length >= MIN_SEGMENT_FRAMES) this.onSegment(Buffer.concat(this.#frames));
+    this.#frames = [];
+    this.#quiet = 0;
+  }
+
+  #absorb(frame) {
+    if (framePeak(frame) >= QUIET_PEAK) {
+      this.#quiet = 0;
+      this.#frames.push(frame);
+      return;
+    }
+    this.#quiet += 1;
+    if (this.#quiet < PAUSE_FRAMES) {
+      this.#frames.push(frame);
+      return;
+    }
+    // The third quiet frame closes the phrase. The two already collected stay
+    // behind: a recognizer does not need the silence, and the next phrase gets
+    // a clean start.
+    const phrase = this.#frames.slice(0, this.#frames.length - (this.#quiet - 1));
+    this.#frames = [];
+    this.#quiet = 0;
+    if (phrase.length >= MIN_SEGMENT_FRAMES) this.onSegment(Buffer.concat(phrase));
+  }
+}
+
+/** Join two transcripts without inventing a space between Chinese characters. */
+function joinTranscript(left, right) {
+  if (left === "") return right;
+  if (right === "") return left;
+  const cjk = /[\u3000-\u9fff\uff00-\uffef]$/.test(left) || /^[\u3000-\u9fff\uff00-\uffef]/.test(right);
+  return cjk ? left + right : `${left} ${right}`;
+}
+
+/**
+ * Recognize pause-delimited phrases one after another and publish the growing
+ * text as a preview.
+ *
+ * Deliberately a side channel: the authoritative text still comes from the one
+ * continuous session, which hears the whole take and gets the service's
+ * sentence-level correction. A failed preview segment is dropped, never
+ * surfaced, so a flaky account cannot spoil a dictation that is already being
+ * decoded by the final pass.
+ */
+class PreviewChain {
+  constructor({ config, endpoint, timeoutMs, signal, emit }) {
+    this.config = config;
+    this.endpoint = endpoint;
+    this.timeoutMs = timeoutMs;
+    this.signal = signal;
+    this.emit = emit;
+    this.text = "";
+    this.stopped = false;
+    this.serial = Promise.resolve();
+    /** Rotate accounts so a long dictation does not hammer one of them. */
+    this.turn = 0;
+  }
+
+  push(pcm) {
+    this.serial = this.serial.then(() => this.#run(pcm)).catch(() => {});
+    return this.serial;
+  }
+
+  /** The final text is in hand; stop publishing previews. */
+  stop() {
+    this.stopped = true;
+  }
+
+  async #run(pcm) {
+    if (this.stopped || this.signal.aborted) return;
+    const candidates = tokenCandidates(this.config);
+    if (candidates.length === 0) return;
+    const candidate = candidates[this.turn % candidates.length];
+    this.turn += 1;
+    let text;
+    try {
+      text = await recognize(pcm, {
+        token: candidate.token,
+        endpoint: this.endpoint,
+        timeoutMs: this.timeoutMs,
+        signal: this.signal,
+      });
+    } catch {
+      return;
+    }
+    if (this.stopped || this.signal.aborted || text === "") return;
+    this.text = joinTranscript(this.text, text);
+    this.emit({ text: this.text });
   }
 }
 
@@ -826,6 +981,23 @@ function registerRoutes(ctx, { getConfig }) {
         const startedAt = Date.now();
         const abort = new AbortController();
         const queue = new ChunkQueue();
+        const live = getConfig();
+        const endpoint = resolveEndpoint(live);
+        const timeoutMs = Number(field(live, "timeoutMs", 30000)) + SESSION_MAX_MS;
+        // The client asks for events so it can show the phrase as it forms.
+        // Without that header the reply stays one JSON body, which keeps old
+        // callers and curl working.
+        const wantsEvents = String(req.headers.accept ?? "").includes("text/event-stream");
+        const emit = (body) => {
+          if (res.writableEnded || res.destroyed) return;
+          res.write(`data: ${JSON.stringify(body)}\n\n`);
+        };
+        // Preview only: the take below still goes to one continuous session, so
+        // the text the user keeps carries the service's whole-utterance fix-up.
+        const preview = wantsEvents
+          ? new PreviewChain({ config: live, endpoint, timeoutMs, signal: abort.signal, emit })
+          : undefined;
+        const segmenter = preview === undefined ? undefined : new PauseSegmenter((pcm) => preview.push(pcm));
         const limit = 4 * 1024 * 1024;
         res.on("close", () => {
           if (!res.writableEnded) abort.abort(new Error("client disconnected"));
@@ -837,29 +1009,57 @@ function registerRoutes(ctx, { getConfig }) {
             return;
           }
           queue.push(chunk);
+          segmenter?.push(chunk);
         });
-        req.on("end", () => queue.finish());
+        req.on("end", () => {
+          queue.finish();
+          segmenter?.finish();
+        });
         req.on("error", (error) => queue.fail(error));
+        if (wantsEvents) {
+          res.writeHead(200, {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-store",
+            connection: "keep-alive",
+            "x-accel-buffering": "no",
+          });
+          res.flushHeaders?.();
+        }
         try {
-          const live = getConfig();
-          const endpoint = resolveEndpoint(live);
           const result = await transcribeWithPool(
             (token) => recognizeStream(queue, {
               token,
               endpoint,
-              timeoutMs: Number(field(live, "timeoutMs", 30000)) + SESSION_MAX_MS,
+              timeoutMs,
               signal: abort.signal,
             }),
             live,
           );
-          sendJson(res, 200, {
-            text: result.text,
-            audioSeconds: result.bytes / 32000,
-            inferenceSeconds: (Date.now() - startedAt) / 1000,
-          });
+          preview?.stop();
+          if (wantsEvents) {
+            emit({
+              text: result.text,
+              audioSeconds: result.bytes / 32000,
+              inferenceSeconds: (Date.now() - startedAt) / 1000,
+              final: true,
+            });
+            if (!res.writableEnded && !res.destroyed) res.end();
+          } else {
+            sendJson(res, 200, {
+              text: result.text,
+              audioSeconds: result.bytes / 32000,
+              inferenceSeconds: (Date.now() - startedAt) / 1000,
+            });
+          }
         } catch (error) {
           // A cancelled upload has no socket left to answer on.
-          if (!res.writableEnded && !res.destroyed) sendJson(res, 500, { error: fail(error) });
+          if (res.writableEnded || res.destroyed) return;
+          if (wantsEvents && res.headersSent) {
+            emit({ error: fail(error) });
+            res.end();
+          } else {
+            sendJson(res, 500, { error: fail(error) });
+          }
         }
       },
     });

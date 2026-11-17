@@ -180,6 +180,8 @@ window.__ModuleLoader__.load({
       'border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.12));',
       'box-shadow:0 6px 24px rgba(0,0,0,.28)}',
       '.dsh-wbvi-tip[data-tone="error"]{color:var(--dsw-alias-state-error-primary,#ff6369)}',
+      '.dsh-wbvi-tip[data-tone="preview"]{max-width:420px;max-height:76px;overflow:hidden;',
+      'white-space:pre-wrap;font-size:13px;color:var(--dsw-alias-label-secondary,#b9b9b9)}',
       '.dsh-wbvi-form{display:flex;flex-direction:column;gap:10px;font-size:13px}',
       '.dsh-wbvi-row{display:flex;align-items:center;gap:10px}',
       '.dsh-wbvi-name{flex:0 0 96px;color:var(--dsw-alias-label-secondary,#8b8b8b)}',
@@ -259,19 +261,38 @@ window.__ModuleLoader__.load({
       return String(cause);
     }
 
+    /** Keep the floating preview short: the tail is what is still being said. */
+    function previewTail(text) {
+      var limit = 120;
+      if (text.length <= limit) return text;
+      return '…' + text.slice(text.length - limit);
+    }
+
     /** Mark a failure that a retry can plausibly fix (transport, not verdict). */
     function retryable(error) {
       error.retryable = true;
       return error;
     }
 
-    async function readTranscript(request) {
+    /**
+     * Read one reply: a single JSON body (a fallback post, or a host that does
+     * not stream) or an event stream carrying the sentence as it forms.
+     */
+    async function readTranscript(request, onPartial) {
       var response;
       try {
         response = await request;
       } catch (cause) {
         throw retryable(new Error(translate('unreachable', { message: messageOf(cause) })));
       }
+      var type = '';
+      try {
+        type = response.headers && typeof response.headers.get === 'function'
+          ? String(response.headers.get('content-type') || '') : '';
+      } catch (ignored) {
+        type = '';
+      }
+      if (type.indexOf('text/event-stream') !== -1) return readEvents(response, onPartial);
       var payload;
       try {
         payload = await response.json();
@@ -280,6 +301,71 @@ window.__ModuleLoader__.load({
       }
       if (!response.ok) throw new Error(payload && payload.error ? payload.error : translate('badStatus', { status: response.status }));
       return typeof payload.text === 'string' ? payload.text : '';
+    }
+
+    /** One event block to its JSON payload, or null for keep-alive chatter. */
+    function parseEvent(block) {
+      var lines = block.split('\n');
+      var data = [];
+      for (var index = 0; index < lines.length; index += 1) {
+        var line = lines[index];
+        if (line.indexOf('data:') !== 0) continue;
+        var value = line.slice(5);
+        data.push(value.charAt(0) === ' ' ? value.slice(1) : value);
+      }
+      if (data.length === 0) return null;
+      try {
+        return JSON.parse(data.join('\n'));
+      } catch (ignored) {
+        return null;
+      }
+    }
+
+    /** The recognizer said no; repeating the request would get the same answer. */
+    function verdict(error) {
+      error.verdict = true;
+      return error;
+    }
+
+    /**
+     * Consume the event stream. Interim text feeds the floating preview; the
+     * closing event carries the text the recognizer settled on, which is what
+     * gets inserted.
+     */
+    async function readEvents(response, onPartial) {
+      if (!response.ok) throw verdict(new Error(translate('badStatus', { status: response.status })));
+      if (!response.body || typeof response.body.getReader !== 'function') {
+        throw retryable(new Error(translate('badResponse')));
+      }
+      var reader = response.body.getReader();
+      var decoder = new TextDecoder('utf-8');
+      var buffer = '';
+      var settled = null;
+      try {
+        for (;;) {
+          var step = await reader.read();
+          if (step.done) break;
+          buffer += decoder.decode(step.value, { stream: true });
+          var cut = buffer.indexOf('\n\n');
+          while (cut !== -1) {
+            var payload = parseEvent(buffer.slice(0, cut));
+            buffer = buffer.slice(cut + 2);
+            cut = buffer.indexOf('\n\n');
+            if (payload === null) continue;
+            if (typeof payload.error === 'string' && payload.error !== '') throw verdict(new Error(payload.error));
+            if (payload.final === true) {
+              settled = typeof payload.text === 'string' ? payload.text : '';
+            } else if (settled === null && typeof payload.text === 'string' && payload.text !== '' && onPartial !== undefined) {
+              onPartial(payload.text);
+            }
+          }
+        }
+      } catch (cause) {
+        if (cause !== null && cause !== undefined && cause.verdict === true) throw cause;
+        throw retryable(new Error(translate('unreachable', { message: messageOf(cause) })));
+      }
+      if (settled === null) throw retryable(new Error(translate('badResponse')));
+      return settled;
     }
 
     /* ------------------------------------------------------------ recording */
@@ -298,6 +384,9 @@ window.__ModuleLoader__.load({
         // take. One capped hold (MAX_HOLD_MS) costs at most ~3.8 MB.
         chunks: [],
         bytes: 0,
+        // Fed with each interim transcript while the take is open; the settled
+        // text arrives once, from the stream's closing event.
+        onPartial: undefined,
         controller: undefined,
         request: undefined,
         streamBroken: false,
@@ -441,7 +530,7 @@ window.__ModuleLoader__.load({
           headers: { 'content-type': 'application/octet-stream' },
           credentials: 'same-origin',
           ...(session.cancel === undefined ? {} : { signal: session.cancel.signal }),
-        }));
+        }), session.onPartial);
       }
 
       session.finish = async function finish() {
@@ -461,7 +550,7 @@ window.__ModuleLoader__.load({
         }
         if (!session.streamBroken && session.request !== undefined) {
           try {
-            return await readTranscript(session.request);
+            return await readTranscript(session.request, session.onPartial);
           } catch (cause) {
             // The stream can fail at the very moment the button is released —
             // `streamBroken` is set from a promise callback that has not run yet.
@@ -505,6 +594,21 @@ window.__ModuleLoader__.load({
       return tip;
     }
 
+    /** The interim transcript: floats above the button, never in the draft. */
+    function Preview(props) {
+      var tip = h('div', {
+        className: 'dsh-wbvi-tip',
+        'data-tone': 'preview',
+        role: 'status',
+        'aria-live': 'polite',
+        style: { left: props.left, top: props.top },
+      }, props.text);
+      if (reactDom && typeof reactDom.createPortal === 'function') {
+        return reactDom.createPortal(tip, document.body);
+      }
+      return tip;
+    }
+
     function HoldToTalk(props) {
       var inputActions = props.inputActions;
       var phaseState = React.useState('idle');
@@ -513,6 +617,12 @@ window.__ModuleLoader__.load({
       var noticeState = React.useState(null);
       var notice = noticeState[0];
       var setNotice = noticeState[1];
+      // Interim transcript while the take is open. It floats above the button and
+      // never touches the composer, so dictation cannot disturb the draft.
+      var previewState = React.useState(null);
+      var preview = previewState[0];
+      var setPreview = previewState[1];
+      var previewAtRef = React.useRef({ left: 24, top: 24 });
       var settingsState = React.useState(DEFAULTS);
       var settings = settingsState[0];
       var setSettings = settingsState[1];
@@ -582,10 +692,14 @@ window.__ModuleLoader__.load({
           text = await session.finish();
         } catch (cause) {
           moveTo('idle');
+          setPreview(null);
           showNotice('error', messageOf(cause));
           return;
         }
         moveTo('idle');
+        // The settled text replaces the preview in one insert: the recognizer
+        // revises its tail, so the preview is never what gets written.
+        setPreview(null);
         if (text === null) return; // accidental tap
         insert(text);
       }
@@ -623,6 +737,16 @@ window.__ModuleLoader__.load({
           ? Math.min(ALT_MIN_HOLD_MS, settingsRef.current.minHoldMs)
           : settingsRef.current.minHoldMs;
         session.onLimit = function onLimit() { releaseFromLimit(session); };
+        session.onPartial = function onPartial(text) {
+          var rect = buttonRef.current ? buttonRef.current.getBoundingClientRect() : null;
+          if (rect !== null) {
+            previewAtRef.current = {
+              left: Math.max(8, Math.min(rect.left - 8, window.innerWidth - 428)),
+              top: Math.max(8, rect.top - 76),
+            };
+          }
+          setPreview(text === '' ? null : text);
+        };
         sessionRef.current = session;
         try {
           await session.start();
@@ -664,6 +788,7 @@ window.__ModuleLoader__.load({
         sessionRef.current = null;
         if (session === null) return;
         session.abort();
+        setPreview(null);
         moveTo('idle');
       }
 
@@ -801,8 +926,17 @@ window.__ModuleLoader__.load({
         phase === 'busy' ? h('span', { className: 'dsh-wbvi-spin' }) : null,
       );
 
-      if (notice === null) return button;
-      return h(React.Fragment, null, button, h(Notice, notice));
+      var layers = [button];
+      // While the take is open (and until the settled text lands) the latest
+      // interim line stays above the button.
+      if (preview !== null && phase !== 'idle') {
+        layers.push(h(Preview, {
+          text: previewTail(preview), left: previewAtRef.current.left, top: previewAtRef.current.top,
+        }));
+      }
+      if (notice !== null) layers.push(h(Notice, notice));
+      if (layers.length === 1) return button;
+      return h(React.Fragment, null, layers);
     }
 
     /* ------------------------------------------------------------------ apply */
