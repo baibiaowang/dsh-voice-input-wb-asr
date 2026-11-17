@@ -6,7 +6,7 @@
  * account pool: 4 per account, with a rejected account dropped for the run.
  */
 import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { transcribe } from "./transcribe-core.mjs";
 
 // Nowhere machine-specific: a caller-supplied `out` wins, otherwise the document
@@ -81,9 +81,17 @@ export const TRANSCRIBE_TOOL = {
         throw new Error("未知参数: " + key);
       }
     }
-    const out = typeof args.out === "string" && args.out.length > 0
-      ? args.out
-      : join(DEFAULT_DIR, documentName(new Date()));
+    const root = resolve(DEFAULT_DIR);
+    const requested = typeof args.out === "string" && args.out.length > 0 ? resolve(root, args.out) : undefined;
+    if (requested !== undefined) {
+      const inside = relative(root, requested);
+      // The model supplies this path: keep the document inside the workspace
+      // instead of letting ../ reach anywhere the host user can write.
+      if (inside.startsWith("..") || isAbsolute(requested)) {
+        throw new Error("out 必须落在当前工作目录内: " + root);
+      }
+    }
+    const out = requested ?? join(root, documentName(new Date()));
     mkdirSync(dirname(out), { recursive: true });
     const log = exec?.log ?? (() => {});
     const result = await transcribe({

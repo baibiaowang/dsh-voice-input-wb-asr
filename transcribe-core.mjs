@@ -10,10 +10,13 @@
  * Nothing here touches argv or console: the caller supplies inputs, options and
  * a log sink, and gets the document back.
  */
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, basename, extname, resolve } from "node:path";
+import { join, basename, dirname, extname, resolve } from "node:path";
 
 const SAMPLE_RATE = 16000;
 const BYTES_PER_SECOND = SAMPLE_RATE * 2;
@@ -41,7 +44,12 @@ export function collect(inputs) {
     if (statSync(path).isDirectory()) {
       for (const entry of readdirSync(path).sort()) {
         const child = join(path, entry);
-        if (statSync(child).isFile()) out.push(child);
+        // A broken link or a vanished file must not abort the whole batch.
+        try {
+          if (statSync(child).isFile()) out.push(child);
+        } catch {
+          continue;
+        }
       }
     } else {
       out.push(path);
@@ -52,18 +60,52 @@ export function collect(inputs) {
   return { media, skipped };
 }
 
-export function decodeToPcm(ffmpeg, input, target) {
-  const result = spawnSync(ffmpeg, [
-    "-hide_banner", "-loglevel", "error", "-y",
-    "-i", input,
-    "-vn", "-ac", "1", "-ar", String(SAMPLE_RATE),
-    "-f", "s16le", "-acodec", "pcm_s16le", target,
-  ], { maxBuffer: 1 << 26 });
-  if (result.status !== 0) {
-    const message = String(result.stderr ?? "").trim().split("\n").slice(-2).join(" ");
-    throw new Error("ffmpeg failed" + (message ? ": " + message : ""));
-  }
+export async function decodeToPcm(ffmpeg, input, target) {
+  // Asynchronous: this runs inside the host process, and a synchronous decode
+  // of a long video would freeze the GUI for as long as ffmpeg takes.
+  await new Promise((resolvePromise, reject) => {
+    const child = spawn(ffmpeg, [
+      "-hide_banner", "-loglevel", "error", "-y",
+      "-i", input,
+      "-vn", "-ac", "1", "-ar", String(SAMPLE_RATE),
+      "-f", "s16le", "-acodec", "pcm_s16le", target,
+    ], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (data) => {
+      stderr = (stderr + data.toString()).slice(-4000);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolvePromise();
+        return;
+      }
+      const message = stderr.trim().split("\n").slice(-2).join(" ");
+      reject(new Error("ffmpeg failed" + (message ? ": " + message : "")));
+    });
+  });
   return readFileSync(target);
+}
+
+/**
+ * Read one chunk back from the decoded file instead of holding every file's
+ * PCM in memory: an hour of audio is 115 MB, and a batch can hold many.
+ */
+function readRange(path, start, end) {
+  const fd = openSync(path, "r");
+  try {
+    const size = Math.max(0, end - start);
+    const buffer = Buffer.alloc(size);
+    let read = 0;
+    while (read < size) {
+      const count = readSync(fd, buffer, read, size - read, start + read);
+      if (count === 0) break;
+      read += count;
+    }
+    return read === size ? buffer : buffer.subarray(0, read);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**
@@ -78,11 +120,17 @@ export function planChunks(pcm, chunkSeconds) {
   if (frames === 0) return [{ start: 0, end: pcm.length }];
   const energy = new Float64Array(frames);
   let peak = 0;
+  // One typed-array view over the same bytes: readInt16LE per sample costs
+  // ~57 M calls on an hour of audio.
+  const samples = pcm.byteOffset % 2 === 0
+    ? new Int16Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.length / 2))
+    : undefined;
+  const sampleAt = samples === undefined ? (index) => pcm.readInt16LE(index * 2) : (index) => samples[index];
   for (let f = 0; f < frames; f += 1) {
-    const base = f * FRAME_SAMPLES * 2;
+    const base = f * FRAME_SAMPLES;
     let sum = 0;
     for (let i = 0; i < FRAME_SAMPLES; i += 1) {
-      const sample = pcm.readInt16LE(base + i * 2);
+      const sample = sampleAt(base + i);
       sum += sample * sample;
     }
     energy[f] = Math.sqrt(sum / FRAME_SAMPLES);
@@ -131,7 +179,11 @@ export function planChunks(pcm, chunkSeconds) {
   for (let i = 0; i < points.length - 1; i += 1) {
     const start = points[i] * FRAME_SAMPLES * 2;
     const end = i === points.length - 2 ? pcm.length : points[i + 1] * FRAME_SAMPLES * 2;
-    if (end - start < BYTES_PER_SECOND) continue; // under half a second: fold forward
+    // Under a second is not worth a request: keep it with the previous chunk.
+    if (end - start < BYTES_PER_SECOND && chunks.length > 0) {
+      chunks[chunks.length - 1].end = end;
+      continue;
+    }
     chunks.push({ start, end });
   }
   return chunks;
@@ -203,6 +255,15 @@ export async function transcribe(options) {
     if (skipped.length > 0) log("skipped " + skipped.length + " non-media file(s)");
   }
 
+  if (!opts.pcmDir) {
+    // One probe: without it a missing ffmpeg shows up as one "skip" per file and
+    // then the misleading "nothing to transcribe".
+    const probe = spawnSync(ffmpeg, ["-version"], { stdio: "ignore" });
+    if (probe.status !== 0) {
+      throw new Error("ffmpeg is not runnable (" + ffmpeg + "): set FFMPEG_PATH, or install it in ~/.dsh/skills/wb-asr/bin or on PATH");
+    }
+  }
+
   const config = { activeRegion: opts.region, accountPool: true, timeoutMs: 90000 };
   const tokens = tokenCandidates(config);
   if (tokens.length === 0) {
@@ -224,7 +285,7 @@ export async function transcribe(options) {
       const target = join(temp, "f" + fileIndex + ".pcm");
       let pcm;
       try {
-        pcm = opts.pcmDir ? readFileSync(item.path) : decodeToPcm(ffmpeg, item.path, target);
+        pcm = opts.pcmDir ? readFileSync(item.path) : await decodeToPcm(ffmpeg, item.path, target);
       } catch (error) {
         log("skip " + name + ": " + (error instanceof Error ? error.message : error));
         continue;
@@ -234,7 +295,19 @@ export async function transcribe(options) {
       const pieces = planChunks(pcm, opts.chunk);
       const entry = { name, seconds, pieces: [], fileIndex: filesPlan.length };
       for (const piece of pieces) {
-        const job = { index: chunkIndex, fileIndex: entry.fileIndex, offset: piece.start / BYTES_PER_SECOND, pcm: pcm.subarray(piece.start, piece.end), attempts: 0, text: undefined, empty: undefined, error: undefined };
+        const job = {
+          index: chunkIndex,
+          fileIndex: entry.fileIndex,
+          offset: piece.start / BYTES_PER_SECOND,
+          // Chunks already in memory are used directly; decoded files are read
+          // back per chunk so the whole batch never holds its audio at once.
+          pcm: opts.pcmDir ? pcm.subarray(piece.start, piece.end) : undefined,
+          source: opts.pcmDir ? undefined : { path: target, start: piece.start, end: piece.end },
+          attempts: 0,
+          text: undefined,
+          empty: undefined,
+          error: undefined,
+        };
         entry.pieces.push({ offset: job.offset, length: (piece.end - piece.start) / BYTES_PER_SECOND });
         jobs.push(job);
         chunkIndex += 1;
@@ -242,7 +315,7 @@ export async function transcribe(options) {
       filesPlan.push(entry);
       const cuts = entry.pieces.slice(0, -1).map((piece) => stamp(piece.offset + piece.length));
       log("queued " + name + " (" + stamp(seconds) + ", " + pieces.length + " chunk(s)" + (cuts.length > 0 ? ", cuts at " + cuts.join(" / ") : "") + ")");
-      if (!opts.keepTemp) rmSync(target, { force: true });
+      // The decoded file stays until the run ends: its chunks are read from it.
     }
     if (jobs.length === 0) throw new Error("nothing to transcribe");
 
@@ -261,7 +334,8 @@ export async function transcribe(options) {
         if (job === undefined) return;
         if (slot.dead) { pending.unshift(job.index); return; }
         try {
-          const result = await recognizeStream(framed(job.pcm), { token: slot.record.token, endpoint, timeoutMs: 120000 });
+          const pcm = job.pcm ?? readRange(job.source.path, job.source.start, job.source.end);
+          const result = await recognizeStream(framed(pcm), { token: slot.record.token, endpoint, timeoutMs: 120000 });
           job.text = result.text;
           job.empty = result.text.length === 0;
           done += 1;
@@ -280,8 +354,10 @@ export async function transcribe(options) {
             done += 1;
             log("[" + done + "/" + jobs.length + "] FAILED " + filesPlan[job.fileIndex].name + " @" + stamp(job.offset) + ": " + job.error);
           } else {
-            pending.unshift(job.index);
-            await new Promise((r) => setTimeout(r, 1500 * job.attempts));
+            // Back of the queue, so a failing chunk cannot block the slots that
+            // are making progress, and a jittered wait keeps the retries apart.
+            pending.push(job.index);
+            await new Promise((r) => setTimeout(r, 800 * job.attempts + Math.random() * 400));
           }
         }
       }
@@ -325,6 +401,7 @@ export async function transcribe(options) {
       ? resolve(opts.out)
       : resolve("wb-transcripts-" + date.getFullYear() + pad(date.getMonth() + 1) + pad(date.getDate()) + "-" + pad(date.getHours()) + pad(date.getMinutes()) + ".md");
     const markdown = lines.join("\n");
+    mkdirSync(dirname(outPath), { recursive: true });
     writeFileSync(outPath, markdown, "utf8");
     log("wrote " + outPath + " (" + failed + " failed chunk(s))");
 

@@ -296,16 +296,16 @@ window.__ModuleLoader__.load({
      */
     function composerEditor() {
       try {
-        var lexical = firstVisible('[data-lexical-editor="true"]');
-        if (lexical !== null) return lexical;
-        var plain = firstVisible('[contenteditable="true"]');
-        if (plain !== null) return plain;
+        // The focused editor wins: a page can hold more than one composer, and
+        // setDraft writes the one holding the caret.
         var active = document.activeElement;
         if (active && typeof active.closest === 'function') {
-          var around = active.closest('[contenteditable="true"]');
+          var around = active.closest('[data-lexical-editor="true"], [contenteditable="true"]');
           if (around !== null && around !== undefined) return around;
         }
-        return null;
+        var lexical = firstVisible('[data-lexical-editor="true"]');
+        if (lexical !== null) return lexical;
+        return firstVisible('[contenteditable="true"]');
       } catch (ignored) {
         return null;
       }
@@ -329,37 +329,43 @@ window.__ModuleLoader__.load({
      * quotes) do not survive a whole-draft write, so such takes fall back to
      * the plain insert path.
      */
-    function draftWriter(actions, shell) {
+    function draftWriter(actions) {
       if (actions === null || actions === undefined) return null;
       if (typeof actions.setDraft !== 'function') return null;
-      var projection = shell === null || shell === undefined ? undefined : shell.projection;
-      var source = 'page';
-      var base;
-      if (projection === null || projection === undefined) {
-        // The slot is handed the composer's actions but not its keyboard, so the
-        // text already in the box is read from the page instead.
-        base = composerDraft();
-        if (base === null) return null;
-      } else {
-        if (projection.quotes !== undefined && projection.quotes !== null && projection.quotes.length > 0) return null;
-        if (projection.occurrences !== undefined && projection.occurrences !== null && projection.occurrences.length > 0) return null;
-        base = typeof projection.clipboardText === 'string' ? projection.clipboardText : '';
-        source = 'keyboard';
-      }
+      var base = composerDraft();
+      if (base === null) return null;
       var separator = base !== '' && !/[\s]$/.test(base) ? '\n' : '';
       var current = base;
+      var broken = false;
       return {
-        source: source,
-        /** Replace the line under dictation; an empty string takes it back out. */
+        source: 'page',
+        /** True while this writer still owns the draft it is rewriting. */
+        live: function live() { return !broken; },
+        /**
+         * Replace the line under dictation; an empty string takes it back out.
+         * Returns false once the draft is no longer ours to rewrite.
+         */
         text: function text(next) {
+          if (broken) return false;
           var whole = next === '' ? base : base + separator + next;
-          if (whole === current) return;
-          current = whole;
+          if (whole === current) return true;
+          // Anything typed since the last write belongs to the user: stop
+          // rewriting, and let the settled text be inserted at the caret.
+          var live = composerDraft();
+          if (live !== null && live !== current) {
+            broken = true;
+            report('write-abandoned', {});
+            return false;
+          }
           try {
             actions.setDraft(whole);
           } catch (cause) {
+            broken = true;
             report('write-fail', { message: messageOf(cause) });
+            return false;
           }
+          current = whole;
+          return true;
         },
       };
     }
@@ -436,28 +442,44 @@ window.__ModuleLoader__.load({
       var decoder = new TextDecoder('utf-8');
       var buffer = '';
       var settled = null;
+      // One event per block, whatever the line ending: a proxy is free to use CRLF.
+      var take = function take() {
+        var match = /\r?\n\r?\n/.exec(buffer);
+        if (match === null) return undefined;
+        var block = buffer.slice(0, match.index);
+        buffer = buffer.slice(match.index + match[0].length);
+        return block;
+      };
+      var handle = function handle(block) {
+        var payload = parseEvent(block);
+        if (payload === null) return;
+        if (typeof payload.error === 'string' && payload.error !== '') throw verdict(new Error(payload.error));
+        if (payload.final === true) {
+          settled = typeof payload.text === 'string' ? payload.text : '';
+        } else if (settled === null && typeof payload.text === 'string' && payload.text !== '' && onPartial !== undefined) {
+          onPartial(payload.text);
+        }
+      };
       try {
         for (;;) {
           var step = await reader.read();
           if (step.done) break;
           buffer += decoder.decode(step.value, { stream: true });
-          var cut = buffer.indexOf('\n\n');
-          while (cut !== -1) {
-            var payload = parseEvent(buffer.slice(0, cut));
-            buffer = buffer.slice(cut + 2);
-            cut = buffer.indexOf('\n\n');
-            if (payload === null) continue;
-            if (typeof payload.error === 'string' && payload.error !== '') throw verdict(new Error(payload.error));
-            if (payload.final === true) {
-              settled = typeof payload.text === 'string' ? payload.text : '';
-            } else if (settled === null && typeof payload.text === 'string' && payload.text !== '' && onPartial !== undefined) {
-              onPartial(payload.text);
-            }
-          }
+          for (var block = take(); block !== undefined; block = take()) handle(block);
+        }
+        // The decoder holds a split multi-byte character until it is flushed,
+        // and the last block may arrive without its closing blank line.
+        buffer += decoder.decode();
+        for (var last = take(); last !== undefined; last = take()) handle(last);
+        if (buffer.trim() !== '') {
+          handle(buffer);
+          buffer = '';
         }
       } catch (cause) {
         if (cause !== null && cause !== undefined && cause.verdict === true) throw cause;
         throw retryable(new Error(translate('unreachable', { message: messageOf(cause) })));
+      } finally {
+        try { await reader.cancel(); } catch (ignored) { /* the body is done either way */ }
       }
       if (settled === null) throw retryable(new Error(translate('badResponse')));
       return settled;
@@ -490,6 +512,8 @@ window.__ModuleLoader__.load({
         settled: undefined,
         streamBroken: false,
         aborted: false,
+        /** A cancelled take must not write its line back after the draft was restored. */
+        cancelled: false,
         stopped: false,
         startedAt: 0,
         release: undefined,
@@ -525,6 +549,13 @@ window.__ModuleLoader__.load({
           return;
         }
         session.startedAt = Date.now();
+        // Owned from the moment the microphone opens: if building the audio
+        // graph fails below, the tracks are still stopped.
+        session.release = function stopTracks() {
+          try {
+            stream.getTracks().forEach(function stopTrack(track) { track.stop(); });
+          } catch (ignored) { /* already gone */ }
+        };
         var AudioCtor = window.AudioContext || window.webkitAudioContext;
         var context = new AudioCtor({ sampleRate: TARGET_RATE });
         session.context = context;
@@ -774,6 +805,12 @@ window.__ModuleLoader__.load({
           showNotice('info', translate('empty'));
           return;
         }
+        if (inputActions === null || inputActions === undefined
+          || typeof inputActions.captureInsertion !== 'function'
+          || typeof inputActions.insertText !== 'function') {
+          showNotice('error', translate('insertFailed', { message: 'composer insert is unavailable' }));
+          return;
+        }
         var span = inputActions.captureInsertion();
         var written = false;
         try {
@@ -797,12 +834,12 @@ window.__ModuleLoader__.load({
         moveTo('idle');
         // The settled text replaces the live preview in one write: the
         // recognizer revises its tail, so the preview is never what is kept.
-        if (session.writer !== null) {
-          session.writer.text(text === null ? '' : text);
+        if (session.writer !== null && session.writer.text(text === null ? '' : text)) {
           report('final', { chars: text === null ? 0 : text.length });
           return;
         }
         if (text === null) return; // accidental tap
+        // No composer to rewrite (or the user typed over it): insert at the caret.
         insert(text);
       }
 
@@ -835,10 +872,10 @@ window.__ModuleLoader__.load({
           setSettings(next);
         });
         var session = createSession();
-        session.writer = draftWriter(inputActions, shell);
+        session.writer = draftWriter(inputActions);
         report('start', {
-          keyboard: shell === undefined ? 'absent' : 'present',
           setDraft: inputActions && typeof inputActions.setDraft === 'function' ? 'yes' : 'no',
+          insert: inputActions && typeof inputActions.insertText === 'function' ? 'yes' : 'no',
           writer: session.writer === null ? 'off' : 'on',
           draft: session.writer === null ? 'none' : session.writer.source,
         });
@@ -848,6 +885,7 @@ window.__ModuleLoader__.load({
         session.onLimit = function onLimit() { releaseFromLimit(session); };
         session.onPartial = function onPartial(text) {
           // The composer is the preview: each sentence lands where it will stay.
+          if (session.cancelled) return;
           if (session.writer !== null) {
             session.writer.text(text);
             report('partial', { chars: text.length });
@@ -895,6 +933,7 @@ window.__ModuleLoader__.load({
         var session = sessionRef.current;
         sessionRef.current = null;
         if (session === null) return;
+        session.cancelled = true;
         session.abort();
         if (session.writer !== null) session.writer.text('');
         moveTo('idle');
@@ -967,8 +1006,11 @@ window.__ModuleLoader__.load({
           }, ALT_ARM_MS);
         }
         function onOtherKey(event) {
-          // Another key joined: this is a shortcut, not dictation.
+          // Another key joined: this is a shortcut, not dictation. Modifiers and
+          // IME composition are not typing, so they leave the take alone.
           if (event.key === 'Alt') return;
+          if (event.isComposing) return;
+          if (event.key === 'Shift' || event.key === 'Control' || event.key === 'Meta' || event.key === 'CapsLock') return;
           if (disarm()) return;
           if (sessionRef.current === null) return;
           holdRef.current.cancel();
@@ -1020,7 +1062,9 @@ window.__ModuleLoader__.load({
         style: { '--dsh-wbvi-ring': settings.ringColor },
         title: label,
         'aria-label': label,
-        disabled: phase === 'busy' || phase === 'starting',
+        // Never disabled while starting: a disabled button loses focus, and the
+        // keyup that ends a keyboard take would go to the body instead.
+        disabled: phase === 'busy',
         onPointerDown: begin,
         onPointerUp: release,
         onPointerCancel: release,

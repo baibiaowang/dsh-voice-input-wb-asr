@@ -22,7 +22,47 @@ import { connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import z from "@deepseek-ai/schemastery";
+
+/**
+ * The settings schema comes from the host's schemastery. That package is a
+ * peer, not a dependency, and a host that does not publish it must still load
+ * the plugin: fall back to a declarative stand-in that keeps the defaults and
+ * the descriptions, so the routes still work without a settings page.
+ */
+async function loadSchema() {
+  try {
+    const module = await import("@deepseek-ai/schemastery");
+    const schema = module?.default ?? module?.Schema;
+    if (typeof schema?.object === "function") return schema;
+  } catch {
+    // Falls through to the stand-in below.
+  }
+  const leaf = (type) => {
+    const node = { type };
+    const chain = () => node;
+    Object.assign(node, {
+      step: chain,
+      min: chain,
+      max: chain,
+      description: chain,
+      role: chain,
+      volatile: chain,
+      default: (value) => {
+        node.value = value;
+        return node;
+      },
+    });
+    return node;
+  };
+  return {
+    string: () => leaf("string"),
+    boolean: () => leaf("boolean"),
+    number: () => leaf("number"),
+    object: (shape) => ({ type: "object", shape }),
+  };
+}
+
+const z = await loadSchema();
 
 export const name = "voice-input-wb-asr";
 
@@ -221,7 +261,7 @@ function discoverAccounts() {
  * 桌面客户端当前登录的排前面，然后按过期时间从近到远。label 只写来源序号，不写
  * 昵称或 uid。
  */
-function tokenCandidates(config) {
+function buildTokenCandidates(config) {
   const region = activeRegion(config);
   const candidates = [];
   const seen = new Set();
@@ -270,6 +310,21 @@ function tokenCandidates(config) {
     if (token) push(token, "file");
   }
   return candidates;
+}
+
+/**
+ * The pool for this take, cached for a few seconds: building it reads six
+ * account files, and a dictation asks for it once per preview phrase.
+ */
+let poolCache = { at: 0, config: undefined, list: undefined };
+function tokenCandidates(config) {
+  const now = Date.now();
+  if (poolCache.list !== undefined && poolCache.config === config && now - poolCache.at < 5000) {
+    return poolCache.list;
+  }
+  const list = buildTokenCandidates(config);
+  poolCache = { at: now, config, list };
+  return list;
 }
 
 /** 当前线路有多少个可用账号（去重后的真实账号数，不含 token.txt 兜底）。 */
@@ -357,6 +412,13 @@ class Socket {
   constructor(socket) {
     this.socket = socket;
     this.buffer = Buffer.alloc(0);
+    /** Last socket error, kept so a read after a reset fails instead of hanging. */
+    this.failure = undefined;
+    // Registered for the life of the socket: an error arriving while no read is
+    // waiting must not become an unhandled 'error' event, which ends the host.
+    socket.on("error", (error) => {
+      this.failure = error;
+    });
   }
 
   static async open(url, headers, timeoutMs) {
@@ -373,7 +435,7 @@ class Socket {
       `Sec-WebSocket-Key: ${key}`,
       "Sec-WebSocket-Version: 13",
       `Origin: ${secure ? "https" : "http"}://${host}`,
-      "User-Agent: dsh-voice-input-wb-asr/0.3",
+      "User-Agent: dsh-voice-input-wb-asr/0.10.0",
       ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`),
     ];
     const socket = secure
@@ -408,6 +470,7 @@ class Socket {
 
   /** Resolve with the next chunk from the socket, or reject when it goes away. */
   #next() {
+    if (this.failure !== undefined) return Promise.reject(this.failure);
     return new Promise((resolve, reject) => {
       const cleanup = () => {
         this.socket.off("data", onData);
@@ -424,6 +487,7 @@ class Socket {
       };
       const onError = (error) => {
         cleanup();
+        this.failure = error;
         reject(error);
       };
       this.socket.on("data", onData);
@@ -551,6 +615,7 @@ async function recognizeStream(chunks, { token, endpoint, timeoutMs, signal, onP
   signal?.addEventListener("abort", onAbort, { once: true });
   let text = "";
   let bytes = 0;
+  let sawFinal = false;
   try {
     client = await opening;
     if (signal?.aborted) throw new Error("wb-asr: 已取消");
@@ -583,12 +648,18 @@ async function recognizeStream(chunks, { token, endpoint, timeoutMs, signal, onP
         text = message.text;
         if (!message.final) onPartial?.(text);
       }
-      if (message?.final) break;
+      if (message?.final) {
+        sawFinal = true;
+        break;
+      }
     }
   } finally {
     signal?.removeEventListener("abort", onAbort);
     client?.close();
   }
+  // A session cut off by the message cap or a close frame never corrected its
+  // tail; returning that interim text would look like a good transcript.
+  if (!sawFinal && text !== "") throw new Error("wb-asr: 识别服务提前关闭，未给出最终结果");
   return { text: text.trim(), bytes };
 }
 
@@ -607,7 +678,8 @@ async function recognize(pcm, options) {
 /** Ordered hand-off between the HTTP upload and the recognizer's socket pump. */
 class ChunkQueue {
   constructor() {
-    this.items = [];
+    /** Every chunk of the take, in order: a retry replays it from the start. */
+    this.log = [];
     this.waiters = [];
     this.ended = false;
     this.failure = undefined;
@@ -618,7 +690,7 @@ class ChunkQueue {
   push(item) {
     if (this.ended) return;
     this.bytes += item.length;
-    this.items.push(item);
+    this.log.push(item);
     this.#wake();
   }
 
@@ -639,10 +711,18 @@ class ChunkQueue {
     for (const resolve of waiting) resolve();
   }
 
+  /**
+   * Read the take from its first byte. Each attempt gets its own cursor, so
+   * failing over to the next account replays the audio instead of handing the
+   * new connection an already drained queue.
+   */
   async *[Symbol.asyncIterator]() {
+    let cursor = 0;
     for (;;) {
-      if (this.items.length > 0) {
-        yield this.items.shift();
+      if (cursor < this.log.length) {
+        const item = this.log[cursor];
+        cursor += 1;
+        yield item;
         continue;
       }
       if (this.failure) throw this.failure;
@@ -671,7 +751,7 @@ const MIN_SEGMENT_FRAMES = 4;
 const MAX_SEGMENT_FRAMES = 30;
 
 /** Opt-out trace (`WB_ASR_DEBUG=0`): one line per preview stage, in the temp dir. */
-const DEBUG_LOG = process.env.WB_ASR_DEBUG === "0" ? undefined : join(tmpdir(), "wb-asr-debug.log");
+const DEBUG_LOG = process.env.WB_ASR_DEBUG === "1" ? join(tmpdir(), "wb-asr-debug.log") : undefined;
 
 function trace(...parts) {
   if (DEBUG_LOG === undefined) return;
@@ -700,7 +780,7 @@ function framePeak(frame) {
  * The cloud recognizer answers only when it decides an utterance has ended or
  * the stream closes; in continuous speech that is the end of the take, so its
  * own interim results arrive too late to read while talking. This separates
- * phrases on our side instead: a pause of 0.3 s closes a segment, the trailing
+ * phrases on our side instead: a pause of 0.2 s closes a segment, the trailing
  * silence is dropped, and the next phrase starts a new one.
  */
 class PauseSegmenter {
@@ -710,6 +790,8 @@ class PauseSegmenter {
   #frames = [];
   /** Consecutive quiet frames at the tail of #frames. */
   #quiet = 0;
+  /** Recent loudness, so a low-gain microphone is not read as one long silence. */
+  #level = 0;
 
   constructor(onSegment) {
     this.onSegment = onSegment;
@@ -736,8 +818,15 @@ class PauseSegmenter {
     this.#quiet = 0;
   }
 
+  /** Loud relative to this take, capped by the absolute room-tone threshold. */
+  #threshold() {
+    return Math.max(200, Math.min(QUIET_PEAK, Math.round(this.#level * 0.06)));
+  }
+
   #absorb(frame) {
-    if (framePeak(frame) >= QUIET_PEAK) {
+    const peak = framePeak(frame);
+    this.#level = Math.max(peak, Math.round(this.#level * 0.995));
+    if (peak >= this.#threshold()) {
       this.#quiet = 0;
       this.#frames.push(frame);
       if (this.#frames.length >= MAX_SEGMENT_FRAMES) this.#forceCut();
@@ -748,9 +837,9 @@ class PauseSegmenter {
       this.#frames.push(frame);
       return;
     }
-    // The third quiet frame closes the phrase. The two already collected stay
-    // behind: a recognizer does not need the silence, and the next phrase gets
-    // a clean start.
+    // The second quiet frame closes the phrase. The one already collected
+    // stays behind: a recognizer does not need the silence, and the next phrase
+    // gets a clean start.
     const phrase = this.#frames.slice(0, this.#frames.length - (this.#quiet - 1));
     this.#frames = [];
     this.#quiet = 0;
@@ -823,9 +912,19 @@ class PreviewChain {
     this.nextToPublish = 0;
     /** Rotate accounts so a long dictation does not hammer one of them. */
     this.turn = 0;
+    /** Phrases dropped because the preview could not keep up. */
+    this.skipped = 0;
   }
 
   push(pcm) {
+    // A preview that lags behind the speaker is worth nothing, and queueing it
+    // would hold every phrase in memory until the recognizer catches up. Drop
+    // the preview for this phrase instead: the final pass still hears it.
+    if (this.jobs.length + this.running >= this.lanes * 3) {
+      this.skipped += 1;
+      trace(`preview skipped ${this.skipped}`);
+      return;
+    }
     this.jobs.push({ seq: this.issued, pcm });
     this.issued += 1;
     this.#pump();
@@ -840,10 +939,12 @@ class PreviewChain {
     while (!this.stopped && !this.signal.aborted && this.running < this.lanes && this.jobs.length > 0) {
       const job = this.jobs.shift();
       this.running += 1;
-      this.#run(job).finally(() => {
-        this.running -= 1;
-        this.#pump();
-      });
+      this.#run(job)
+        .catch(() => {})
+        .finally(() => {
+          this.running -= 1;
+          this.#pump();
+        });
     }
   }
 
@@ -992,7 +1093,12 @@ function hostGate(ctx) {
 async function hostRefusal(ctx, req, res) {
   const gate = hostGate(ctx);
   if (gate === undefined) return false;
-  const rejection = await gate(req);
+  let rejection;
+  try {
+    rejection = await gate(req);
+  } catch {
+    rejection = 403;
+  }
   if (rejection === undefined || rejection === null || rejection === false) return false;
   const status = typeof rejection === "number" ? rejection : 403;
   if (!res.writableEnded && !res.destroyed) sendJson(res, status, { error: "not-admitted" });
@@ -1072,7 +1178,13 @@ function registerRoutes(ctx, { getConfig }) {
         if (await hostRefusal(ctx, req, res)) return;
         if (!loopbackOrigin(req)) return sendJson(res, 403, { error: "origin-not-trusted" });
         let body = "";
-        for await (const chunk of req) body += chunk.toString("utf8");
+        // Decoding is left to the stream so a multi-byte character split across
+        // two chunks survives, and a client cannot fill memory with a trace.
+        req.setEncoding("utf8");
+        for await (const chunk of req) {
+          body += chunk;
+          if (body.length >= 4096) break;
+        }
         trace(`client ${body.slice(0, 400)}`);
         sendJson(res, 200, { ok: true });
       },
@@ -1102,8 +1214,12 @@ function registerRoutes(ctx, { getConfig }) {
         };
         // Preview only: the take below still goes to one continuous session, so
         // the text the user keeps carries the service's whole-utterance fix-up.
+        // Preview sockets are closed with their own controller, so the error
+        // path cannot leave two recognitions running until their timeout.
+        const previewAbort = new AbortController();
+        abort.signal.addEventListener("abort", () => previewAbort.abort(), { once: true });
         const preview = wantsEvents
-          ? new PreviewChain({ config: live, endpoint, timeoutMs, signal: abort.signal, emit, lanes: 2 })
+          ? new PreviewChain({ config: live, endpoint, timeoutMs, signal: previewAbort.signal, emit, lanes: 2 })
           : undefined;
         const segmenter =
           preview === undefined
@@ -1172,6 +1288,8 @@ function registerRoutes(ctx, { getConfig }) {
           } else {
             sendJson(res, 500, { error: fail(error) });
           }
+        } finally {
+          previewAbort.abort();
         }
       },
     });

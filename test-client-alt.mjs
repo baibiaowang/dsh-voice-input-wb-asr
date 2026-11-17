@@ -411,16 +411,18 @@ const drafts = [];
 const liveActions = {
   captureInsertion: () => ({ span: "fake" }),
   insertText: (text) => { inserted.push({ text }); return true; },
-  setDraft: (text) => { drafts.push(text); },
+  // setDraft rewrites the composer, so the page mirror has to follow it: the
+  // writer checks the live draft before each write.
+  setDraft: (text) => { drafts.push(text); if (documentStub.pageEditor !== null) documentStub.pageEditor.innerText = text; },
 };
-const shell = { projection: { clipboardText: "", quotes: [], occurrences: [] } };
 reset();
 deferredStream = Promise.resolve(sseResponse([
   { text: "这是一段" },
   { text: "这是一段语音识别的测试" },
   { text: "这是一段语音识别的测试。", final: true },
 ]));
-tree = runtime.render(HoldToTalk, { inputActions: liveActions, keyboard: shell });
+documentStub.pageEditor = { offsetParent: {}, innerText: "", querySelector: () => null };
+tree = runtime.render(HoldToTalk, { inputActions: liveActions });
 documentStub.activeElement = buttonNode;
 dispatch("keydown", { key: "Alt", repeat: false, isComposing: false, preventDefault() {} });
 await arm();
@@ -452,7 +454,7 @@ const pageDrafts = [];
 const pageActions = {
   captureInsertion: () => ({ span: "fake" }),
   insertText: (text) => { inserted.push({ text }); return true; },
-  setDraft: (text) => { pageDrafts.push(text); },
+  setDraft: (text) => { pageDrafts.push(text); documentStub.pageEditor.innerText = text; },
 };
 documentStub.pageEditor = { offsetParent: {}, innerText: "旧草稿", querySelector: () => null };
 reset();

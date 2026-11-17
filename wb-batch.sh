@@ -28,7 +28,9 @@ files=()
 opts=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --out|--per-account|--chunk|--region) opts+=("$1" "$2"); shift 2 ;;
+    --out|--per-account|--chunk|--region)
+      if [ $# -lt 2 ]; then echo "$1 needs a value" >&2; exit 1; fi
+      opts+=("$1" "$2"); shift 2 ;;
     --no-timestamps|--keep-temp) opts+=("$1"); shift ;;
     -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 1 ;;
