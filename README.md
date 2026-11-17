@@ -85,7 +85,7 @@ It adds no metered cost: **WorkBuddy does not bill for speech input**, so a run 
 
 > 82 分钟的录像，47 秒转成一份带时间戳的 Markdown 文稿；免费，WorkBuddy 对语音输入不计费。
 
-The document goes to `E:/deepseek工作区/我的/产出/交付物/语音转写-<date>.md` unless `out` names another path. Every file gets a `## N. name (duration)` heading, every chunk a `[mm:ss]` marker, files stay in the order you passed them, and an empty chunk is marked in place instead of vanishing.
+The document goes to `语音转写-<date>.md` in the current working directory unless `out` names another path. Every file gets a `## N. name (duration)` heading, every chunk a `[mm:ss]` marker, files stay in the order you passed them, and an empty chunk is marked in place instead of vanishing.
 
 The command line, `wb-batch.sh`, runs the same recognizer outside the composer for scripts and scheduled jobs. Every account works `--per-account` chunks at once (default 4), long media is cut at quiet points, and the chunks sit in one global queue: an account that finishes takes the next piece, so a slow file does not stall the rest.
 
@@ -102,7 +102,7 @@ bash wb-batch.sh talk.mp3 lecture.m4a recordings/ --out transcript.md
 | `--no-timestamps` | off | Drop the `[mm:ss]` line before each chunk. |
 | `--keep-temp` | off | Keep the decoded PCM instead of deleting it. |
 
-Media is decoded to 16 kHz mono with ffmpeg: the script looks for `FFMPEG_PATH`, then the `wb-asr` skill's bundled binary, then `E:/deepseek工作区/我的/工具链/ffmpeg/bin/ffmpeg.exe`, then `PATH`. Video files work the same way — the audio track is used and the picture is dropped.
+Media is decoded to 16 kHz mono with ffmpeg: the script looks for `FFMPEG_PATH`, then the `wb-asr` skill's bundled binary (`~/.dsh/skills/wb-asr/bin`), then `ffmpeg` on `PATH`. Video files work the same way — the audio track is used and the picture is dropped.
 
 Cut points come from the audio itself: 100 ms frames, and the boundary lands in the middle of a real pause (0.3 s or longer) nearest the target length, searching as far as 1.6x the target so a recording whose pauses come late still gets cut in silence. With no pause in reach, the quietest frame stands in. Every cut is printed when the file is queued (`cuts at 00:09 / 00:20`), so you can check the boundaries against the transcript. A chunk that comes back empty is marked in the document rather than dropped silently, and the header counts how many there were.
 

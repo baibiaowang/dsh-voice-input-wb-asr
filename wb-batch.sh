@@ -17,8 +17,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 FF="${FFMPEG_PATH:-}"
 if [ -z "$FF" ]; then
   for candidate in "$HOME/.dsh/skills/wb-asr/bin/ffmpeg.exe" \
-                   "E:/deepseek工作区/我的/工具链/ffmpeg/bin/ffmpeg.exe" \
-                   "/c/Program Files/ffmpeg/bin/ffmpeg.exe"; do
+                   "$HOME/.dsh/skills/wb-asr/bin/ffmpeg"; do
     if [ -x "$candidate" ]; then FF="$candidate"; break; fi
   done
 fi
@@ -47,7 +46,7 @@ is_media() {
 }
 
 pick_tmp() {
-  for base in "${WB_BATCH_TMP:-}" "${TMPDIR:-}" "${LOCALAPPDATA:-$HOME}/Temp" "$HOME/AppData/Local/Temp" "E:/deepseek工作区/我的/产出/scratch"; do
+  for base in "${WB_BATCH_TMP:-}" "${TMPDIR:-}" "${LOCALAPPDATA:-$HOME}/Temp" "$HOME/AppData/Local/Temp" "/tmp"; do
     [ -n "$base" ] || continue
     candidate="$base/wb-batch-$$-$RANDOM"
     if mkdir -p "$candidate" 2>/dev/null; then printf '%s' "$candidate"; return 0; fi

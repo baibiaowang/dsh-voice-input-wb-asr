@@ -21,11 +21,13 @@ const AUDIO = new Set([".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus",
 const VIDEO = new Set([".mp4", ".mkv", ".mov", ".avi", ".flv", ".webm", ".ts", ".wmv", ".m4v", ".mpg", ".mpeg", ".3gp", ".rmvb"]);
 
 export function findFfmpeg() {
+  // Only machine-independent places: an explicit override, the wb-asr skill's
+  // bundled binary, then whatever `ffmpeg` resolves to on PATH.
+  const bundled = join(homedir(), ".dsh", "skills", "wb-asr", "bin");
   const candidates = [
     process.env.FFMPEG_PATH,
-    join(homedir(), ".dsh", "skills", "wb-asr", "bin", "ffmpeg.exe"),
-    join("E:", "deepseek工作区", "我的", "工具链", "ffmpeg", "bin", "ffmpeg.exe"),
-    join("C:", "Program Files", "ffmpeg", "bin", "ffmpeg.exe"),
+    join(bundled, "ffmpeg.exe"),
+    join(bundled, "ffmpeg"),
   ].filter(Boolean);
   for (const path of candidates) if (existsSync(path)) return path;
   return "ffmpeg";

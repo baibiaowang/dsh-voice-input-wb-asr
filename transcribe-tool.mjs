@@ -9,7 +9,9 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { transcribe } from "./transcribe-core.mjs";
 
-const DEFAULT_DIR = join("E:", "deepseek工作区", "我的", "产出", "交付物");
+// Nowhere machine-specific: a caller-supplied `out` wins, otherwise the document
+// lands in the directory the host happens to be running in.
+const DEFAULT_DIR = process.cwd();
 
 function documentName(date) {
   const pad = (n) => String(n).padStart(2, "0");
@@ -34,7 +36,7 @@ export const TRANSCRIBE_TOOL = {
       },
       out: {
         type: "string",
-        description: "输出 Markdown 文件路径。不填则写到 E:/deepseek工作区/我的/产出/交付物/语音转写-<日期-时间>.md。",
+        description: "输出 Markdown 文件路径。不填则写到当前工作目录下的 语音转写-<日期-时间>.md。",
       },
       region: {
         type: "string",
