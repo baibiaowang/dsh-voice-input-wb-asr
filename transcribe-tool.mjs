@@ -24,7 +24,7 @@ export const TRANSCRIBE_TOOL = {
     "批量把语音/音频/视频文件转成文字，合并成一个 Markdown 文档。用 WorkBuddy 云端识别（识别率高于本地），"
     + "账号池并发：每个账号 4 路，长音频自动在静音处切段并发跑，按原顺序拼回去。"
     + "输入可以是文件列表，也可以是一个目录（目录里的音频/视频全部处理，非媒体文件跳过）。"
-    + "支持 mp3/wav/m4a/aac/flac/ogg/opus/wma/amr/aiff 与 mp4/mkv/mov/avi/flv/webm/ts 等；"
+    + "支持 mp3/wav/m4a/aac/flac/ogg/opus/wma/amr/aiff/caf 与 mp4/mkv/mov/avi/flv/webm/ts 等；"
     + "视频自动取音轨，不需要先抽音频。结果里的 markdown 就是文档正文，可原样发给用户。",
   parameters: {
     type: "object",

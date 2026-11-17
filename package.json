@@ -1,7 +1,7 @@
 {
   "name": "dsh-voice-input-wb-asr",
-  "version": "0.7.1",
-  "description": "WorkBuddy (wb-asr) cloud recognition for dsh, plus a hold-to-talk microphone in the composer (pointer, or Alt while the caret is in the composer) and wb_transcribe for batch transcription of long audio and video (free: WorkBuddy does not bill speech input)",
+  "version": "0.7.2",
+  "description": "Free WorkBuddy (wb-asr) cloud recognition for dsh, plus a hold-to-talk microphone in the composer (pointer, or Alt while the caret is in the composer) and wb_transcribe for batch transcription of long audio and video (free: WorkBuddy does not bill speech input)",
   "type": "module",
   "license": "MIT",
   "keywords": ["dsh", "dsh-plugin", "voice", "speech-to-text", "asr", "workbuddy", "microphone"],

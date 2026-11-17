@@ -1,5 +1,9 @@
 # dsh-voice-input-wb-asr
 
+**Free.** WorkBuddy does not bill speech input: recognition runs on the WorkBuddy accounts you already signed in with — no API key, no per-minute charge, no local model to download.
+
+**免费**：WorkBuddy 对语音输入不计费——只走你本机已登录的账号，不用 API key、不按分钟收费、也不下载本地模型。
+
 Hold-to-talk voice input for [DeepSeek Harness](https://github.com/deepseek-ai) — hold the composer microphone (or hold `Alt` while the caret is in the composer), speak, release, and the text is inserted at the caret.
 
 It also turns recordings into documents: `wb_transcribe` takes audio or video paths in a conversation and returns one merged transcript — an hour of audio in about a minute. Recognition runs on the WorkBuddy cloud ASR service, so no local model is downloaded: the shipped SenseVoice recognizer needs ~1 GB of model files, this plugin needs none.
@@ -79,7 +83,9 @@ The plugin serves four exact routes for its own client: `.../config`, `.../healt
 
 Measured on this machine: an **82-minute video** (1:22:10) went in, and one merged, timestamped Markdown document came out in **46.9 seconds** — 74 chunks across 8 accounts × 4 channels, 0 failed. That is roughly **105× realtime**, and the command line did the same job in about the same time.
 
-It adds no metered cost: **WorkBuddy does not bill for speech input**, so a run spends nothing but your own signed-in accounts' rate limits. The plugin itself is MIT.
+Measured again on audio alone: eleven files in ten formats — wav, mp3, m4a/AAC, raw AAC, flac, ogg, opus, wma, amr, aiff and caf — 1:43:46 of audio (104 minutes) decoded and transcribed in **51 seconds** (≈**122× realtime**), 0 failed chunks, and every format came back with the identical transcript. A single 9:26 file takes about 13 s, most of that plugin start-up and account discovery.
+
+**Free**: WorkBuddy does not bill for speech input, so a run spends nothing but your own signed-in accounts' rate limits. The plugin itself is MIT.
 
 `wb_transcribe` (0.7.0) puts that pipeline in the conversation itself: pass file paths or a directory and the model gets the merged document back. Nothing to click, no upload dialog — just the paths.
 

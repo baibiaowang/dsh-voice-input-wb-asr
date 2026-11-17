@@ -61,6 +61,9 @@ trap 'rm -rf "$tmp"' EXIT
 count=0
 for input in "${files[@]}"; do
   if [ -d "$input" ]; then
+    # A list file rather than process substitution: `< <(find ...)` has been seen
+    # to come back empty on MSYS, and an empty list silently loses every file.
+    find "$input" -maxdepth 1 -type f | sort > "$tmp/list.txt"
     while IFS= read -r path; do
       if is_media "$path"; then
         count=$((count + 1))
@@ -73,7 +76,7 @@ for input in "${files[@]}"; do
           echo "skip $name: $(tail -1 "$tmp/ff.err")" >&2
         fi
       fi
-    done < <(find "$input" -maxdepth 1 -type f | sort)
+    done < "$tmp/list.txt"
   elif [ -f "$input" ]; then
     if is_media "$input"; then
       count=$((count + 1))
