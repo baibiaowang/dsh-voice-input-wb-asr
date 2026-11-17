@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
     var ROUTE = '/plugins/dsh-voice-input-wb-asr/stream';
     var CONFIG_ROUTE = '/plugins/dsh-voice-input-wb-asr/config';
     var TRACE_ROUTE = '/plugins/dsh-voice-input-wb-asr/trace';
-    var VERSION = '0.9.3';
+    var VERSION = '0.9.4';
     var SLOT = 'conversation.input.right';
     var TARGET_RATE = 16000;
     // Below this the user tapped instead of speaking; nothing is uploaded.
@@ -182,8 +182,6 @@ window.__ModuleLoader__.load({
       'border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.12));',
       'box-shadow:0 6px 24px rgba(0,0,0,.28)}',
       '.dsh-wbvi-tip[data-tone="error"]{color:var(--dsw-alias-state-error-primary,#ff6369)}',
-      '.dsh-wbvi-tip[data-tone="preview"]{max-width:420px;max-height:76px;overflow:hidden;',
-      'white-space:pre-wrap;font-size:13px;color:var(--dsw-alias-label-secondary,#b9b9b9)}',
       '.dsh-wbvi-form{display:flex;flex-direction:column;gap:10px;font-size:13px}',
       '.dsh-wbvi-row{display:flex;align-items:center;gap:10px}',
       '.dsh-wbvi-name{flex:0 0 96px;color:var(--dsw-alias-label-secondary,#8b8b8b)}',
@@ -279,22 +277,35 @@ window.__ModuleLoader__.load({
       return String(cause);
     }
 
-    /** Keep the floating preview short: the tail is what is still being said. */
-    function previewTail(text) {
-      var limit = 120;
-      if (text.length <= limit) return text;
-      return '…' + text.slice(text.length - limit);
+    /** The first visible element matching a selector, or null. */
+    function firstVisible(selector) {
+      if (typeof document.querySelectorAll !== 'function') return null;
+      var nodes = document.querySelectorAll(selector);
+      var fallback = null;
+      for (var index = 0; index < nodes.length; index += 1) {
+        if (nodes[index].offsetParent !== null) return nodes[index];
+        if (fallback === null) fallback = nodes[index];
+      }
+      return fallback;
     }
 
-    /** The composer's editable: Lexical marks the element it renders into. */
+    /**
+     * The composer's editable. Lexical marks the element it renders into; a
+     * plain contenteditable is accepted too, and the focused element is used
+     * last, since the caret sits in the composer while dictating.
+     */
     function composerEditor() {
       try {
-        if (typeof document.querySelectorAll !== 'function') return null;
-        var nodes = document.querySelectorAll('[data-lexical-editor="true"]');
-        for (var index = 0; index < nodes.length; index += 1) {
-          if (nodes[index].offsetParent !== null) return nodes[index];
+        var lexical = firstVisible('[data-lexical-editor="true"]');
+        if (lexical !== null) return lexical;
+        var plain = firstVisible('[contenteditable="true"]');
+        if (plain !== null) return plain;
+        var active = document.activeElement;
+        if (active && typeof active.closest === 'function') {
+          var around = active.closest('[contenteditable="true"]');
+          if (around !== null && around !== undefined) return around;
         }
-        return nodes.length > 0 ? nodes[0] : null;
+        return null;
       } catch (ignored) {
         return null;
       }
@@ -306,17 +317,6 @@ window.__ModuleLoader__.load({
       if (editor === null) return null;
       var raw = typeof editor.innerText === 'string' ? editor.innerText : String(editor.textContent || '');
       return raw.replace(/\u00a0/g, ' ').replace(/\n+$/, '');
-    }
-
-    /** Chips (mentions, quotes, files) do not survive a whole-draft write. */
-    function composerHasChips() {
-      var editor = composerEditor();
-      if (editor === null) return false;
-      try {
-        return editor.querySelector('[data-lexical-decorator="true"]') !== null;
-      } catch (ignored) {
-        return false;
-      }
     }
 
     /**
@@ -338,7 +338,6 @@ window.__ModuleLoader__.load({
       if (projection === null || projection === undefined) {
         // The slot is handed the composer's actions but not its keyboard, so the
         // text already in the box is read from the page instead.
-        if (composerHasChips()) return null;
         base = composerDraft();
         if (base === null) return null;
       } else {
@@ -713,21 +712,6 @@ window.__ModuleLoader__.load({
       return tip;
     }
 
-    /** The interim transcript: floats above the button, never in the draft. */
-    function Preview(props) {
-      var tip = h('div', {
-        className: 'dsh-wbvi-tip',
-        'data-tone': 'preview',
-        role: 'status',
-        'aria-live': 'polite',
-        style: { left: props.left, top: props.top },
-      }, props.text);
-      if (reactDom && typeof reactDom.createPortal === 'function') {
-        return reactDom.createPortal(tip, document.body);
-      }
-      return tip;
-    }
-
     function HoldToTalk(props) {
       var inputActions = props.inputActions;
       // The Host's composer shell: where the live draft is read and written.
@@ -738,12 +722,6 @@ window.__ModuleLoader__.load({
       var noticeState = React.useState(null);
       var notice = noticeState[0];
       var setNotice = noticeState[1];
-      // Interim transcript while the take is open. It floats above the button and
-      // never touches the composer, so dictation cannot disturb the draft.
-      var previewState = React.useState(null);
-      var preview = previewState[0];
-      var setPreview = previewState[1];
-      var previewAtRef = React.useRef({ left: 24, top: 24 });
       var settingsState = React.useState(DEFAULTS);
       var settings = settingsState[0];
       var setSettings = settingsState[1];
@@ -813,14 +791,12 @@ window.__ModuleLoader__.load({
           text = await session.finish();
         } catch (cause) {
           moveTo('idle');
-          setPreview(null);
           showNotice('error', messageOf(cause));
           return;
         }
         moveTo('idle');
-        // The settled text replaces the preview in one write: the recognizer
-        // revises its tail, so the preview is never what gets written.
-        setPreview(null);
+        // The settled text replaces the live preview in one write: the
+        // recognizer revises its tail, so the preview is never what is kept.
         if (session.writer !== null) {
           session.writer.text(text === null ? '' : text);
           report('final', { chars: text === null ? 0 : text.length });
@@ -877,15 +853,7 @@ window.__ModuleLoader__.load({
             report('partial', { chars: text.length });
             return;
           }
-          report('partial-float', { chars: text.length });
-          var rect = buttonRef.current ? buttonRef.current.getBoundingClientRect() : null;
-          if (rect !== null) {
-            previewAtRef.current = {
-              left: Math.max(8, Math.min(rect.left - 8, window.innerWidth - 428)),
-              top: Math.max(8, rect.top - 76),
-            };
-          }
-          setPreview(text === '' ? null : text);
+          report('writer-off', { chars: text.length });
         };
         sessionRef.current = session;
         try {
@@ -929,7 +897,6 @@ window.__ModuleLoader__.load({
         if (session === null) return;
         session.abort();
         if (session.writer !== null) session.writer.text('');
-        setPreview(null);
         moveTo('idle');
       }
 
@@ -1068,13 +1035,6 @@ window.__ModuleLoader__.load({
       );
 
       var layers = [button];
-      // While the take is open (and until the settled text lands) the latest
-      // interim line stays above the button.
-      if (preview !== null && phase !== 'idle') {
-        layers.push(h(Preview, {
-          text: previewTail(preview), left: previewAtRef.current.left, top: previewAtRef.current.top,
-        }));
-      }
       if (notice !== null) layers.push(h(Notice, notice));
       if (layers.length === 1) return button;
       return h(React.Fragment, null, layers);
