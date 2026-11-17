@@ -368,4 +368,13 @@ await settle();
 await settle();
 console.log("case8 stream died on release -> fetch", fetchCalls.length, "| inserted", JSON.stringify(inserted.map((e) => e.text)));
 
+/* --- the request must ask for events, or the host answers only on release */
+const posts = fetchCalls.filter((call) => call.init?.method === "POST");
+const askedForEvents = posts.filter((call) => String(call.init?.headers?.accept ?? "").indexOf("text/event-stream") !== -1);
+console.log("asks for events on every take:", askedForEvents.length, "of", posts.length);
+if (posts.length === 0 || askedForEvents.length !== posts.length) {
+  console.log("FAIL: a take did not ask for events");
+  process.exit(1);
+}
+
 console.log("done");

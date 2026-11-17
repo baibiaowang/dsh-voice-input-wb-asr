@@ -486,7 +486,9 @@ window.__ModuleLoader__.load({
             method: 'POST',
             body: body,
             duplex: 'half',
-            headers: { 'content-type': 'application/octet-stream' },
+            // Without this the host answers one JSON body on release and there is
+            // no preview while the button is held; with it the reply is events.
+            headers: { accept: 'text/event-stream', 'content-type': 'application/octet-stream' },
             credentials: 'same-origin',
             ...(session.cancel === undefined ? {} : { signal: session.cancel.signal }),
           });
@@ -527,7 +529,7 @@ window.__ModuleLoader__.load({
         return readTranscript(fetch(ROUTE, {
           method: 'POST',
           body: merged,
-          headers: { 'content-type': 'application/octet-stream' },
+          headers: { accept: 'text/event-stream', 'content-type': 'application/octet-stream' },
           credentials: 'same-origin',
           ...(session.cancel === undefined ? {} : { signal: session.cancel.signal }),
         }), session.onPartial);
