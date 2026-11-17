@@ -727,6 +727,33 @@ function loopbackOrigin(req) {
 }
 
 /**
+ * The host's own request gate, when this host publishes one.
+ *
+ * DSH's connection service exposes `requestRejection(request)`: the Host/Origin
+ * fence and the browser login its own API runs, answering 403, 401, or
+ * `undefined` for a request it would admit. Looked up per request because the
+ * host publishes that service only after its own async init; a host older than
+ * the service has none, and `loopbackOrigin` stays the only fence there.
+ */
+function hostGate(ctx) {
+  const connection = typeof ctx.get === "function" ? ctx.get("connection") : undefined;
+  const gate = connection?.requestRejection;
+  if (typeof gate !== "function") return undefined;
+  return (req) => gate.call(connection, req);
+}
+
+/** Answer with the host's own verdict; true when the request was refused. */
+async function hostRefusal(ctx, req, res) {
+  const gate = hostGate(ctx);
+  if (gate === undefined) return false;
+  const rejection = await gate(req);
+  if (rejection === undefined || rejection === null || rejection === false) return false;
+  const status = typeof rejection === "number" ? rejection : 403;
+  if (!res.writableEnded && !res.destroyed) sendJson(res, status, { error: "not-admitted" });
+  return true;
+}
+
+/**
  * Mount the press-to-talk routes.
  *
  * `POST .../stream` takes raw 16 kHz / 16-bit / mono PCM as a chunked request
@@ -746,6 +773,7 @@ function registerRoutes(ctx, { getConfig }) {
         if (req.method !== "GET" && req.method !== "POST") {
           return sendJson(res, 405, { error: "method not allowed" });
         }
+        if (await hostRefusal(ctx, req, res)) return;
         if (!loopbackOrigin(req)) return sendJson(res, 403, { error: "origin-not-trusted" });
         // Read on every request: a settings edit must reach the next take
         // without the Client reloading the page.
@@ -773,6 +801,7 @@ function registerRoutes(ctx, { getConfig }) {
       path: `${ROUTE_BASE}/health`,
       handler: async (req, res) => {
         if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+        if (await hostRefusal(ctx, req, res)) return;
         if (!loopbackOrigin(req)) return sendJson(res, 403, { error: "origin-not-trusted" });
         const live = getConfig();
         const endpoint = resolveEndpoint(live);
@@ -792,6 +821,7 @@ function registerRoutes(ctx, { getConfig }) {
       path: `${ROUTE_BASE}/stream`,
       handler: async (req, res) => {
         if (req.method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+        if (await hostRefusal(ctx, req, res)) return;
         if (!loopbackOrigin(req)) return sendJson(res, 403, { error: "origin-not-trusted" });
         const startedAt = Date.now();
         const abort = new AbortController();
@@ -839,6 +869,7 @@ function registerRoutes(ctx, { getConfig }) {
       path: `${ROUTE_BASE}/transcribe`,
       handler: async (req, res) => {
         if (req.method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+        if (await hostRefusal(ctx, req, res)) return;
         if (!loopbackOrigin(req)) return sendJson(res, 403, { error: "origin-not-trusted" });
         const abort = new AbortController();
         res.on("close", () => {

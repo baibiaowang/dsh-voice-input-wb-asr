@@ -70,6 +70,10 @@ Every field is volatile: an edit applies to the running plugin without a restart
 - Tokens are read from your own account files and stay in the host half: they are never sent to the browser, and the plugin writes nothing back.
 - Nothing is stored on disk by the plugin; there is no transcript history.
 
+## HTTP routes
+
+The plugin serves four exact routes for its own client: `.../config`, `.../health`, `.../stream` and `.../transcribe`. Each one asks the host's request gate first (`ctx.connection.requestRejection` — the Host/Origin fence and browser login the host runs on its own API), so a page in another origin, or a host exposed beyond loopback, cannot reach them. On a host that publishes no such gate (older than 0.1.0-rc.8) the routes keep the loopback-origin check they always had.
+
 ## Notes and limitations
 
 - The ASR protocol is unofficial — reverse engineered from the WorkBuddy web client, the same protocol the `wb-asr` skill speaks. It can break when the service changes.

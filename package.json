@@ -1,6 +1,6 @@
 {
   "name": "dsh-voice-input-wb-asr",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "WorkBuddy (wb-asr) cloud recognition for dsh, plus a hold-to-talk microphone in the composer (pointer, or Alt while the caret is in the composer)",
   "type": "module",
   "license": "MIT",
@@ -30,7 +30,8 @@
     "test-region-gate.mjs",
     "test-standalone.mjs",
     "test-client-alt.mjs",
-    "test-settings-render.mjs"
+    "test-settings-render.mjs",
+    "test-host-gate.mjs"
   ],
   "peerDependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
