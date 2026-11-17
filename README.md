@@ -2,7 +2,7 @@
 
 Hold-to-talk voice input for [DeepSeek Harness](https://github.com/deepseek-ai) — hold the composer microphone (or hold `Alt` while the caret is in the composer), speak, release, and the text is inserted at the caret.
 
-Recognition runs on the WorkBuddy cloud ASR service, so no local model is downloaded: the shipped SenseVoice recognizer needs ~1 GB of model files, this plugin needs none.
+It also turns recordings into documents: `wb_transcribe` takes audio or video paths in a conversation and returns one merged transcript — an hour of audio in about a minute. Recognition runs on the WorkBuddy cloud ASR service, so no local model is downloaded: the shipped SenseVoice recognizer needs ~1 GB of model files, this plugin needs none.
 
 按住说话，松开出字。识别走 WorkBuddy 云端，不用下 1 GB 的本地模型。
 
@@ -13,6 +13,7 @@ Recognition runs on the WorkBuddy cloud ASR service, so no local model is downlo
 - **Registers as a provider** for the shipped speech-to-text service when that service is mounted, so a profile that keeps the click-to-start microphone still works. Where it does, the shipped microphone button is disabled so the composer carries one microphone, not two.
 - **Uses the accounts already signed in on this machine.** Tokens are read from the local WorkBuddy account stores; when one is rejected the next account is tried, so a stale token does not break the button.
 - **International and domestic builds, kept apart.** The region decides the endpoint: `www.workbuddy.ai` for the international build, `www.workbuddy.cn` for the domestic one. International is the default and is the only one that runs until the domestic build is switched on in settings. A token only works on its own region, and the account pool records which one each token belongs to.
+- **Batch transcription, in the conversation or from the shell**: a whole recording, or a directory of them, becomes one timestamped Markdown document — 82 minutes in 47 seconds in the measured run. No upload dialog, no local model, no metered cost (WorkBuddy does not bill speech input).
 - **No dependencies outside Node built-ins**: the WebSocket client and the RIFF/WAVE reader are part of the plugin.
 
 ## Requirements
@@ -73,6 +74,39 @@ Every field is volatile: an edit applies to the running plugin without a restart
 ## HTTP routes
 
 The plugin serves four exact routes for its own client: `.../config`, `.../health`, `.../stream` and `.../transcribe`. Each one asks the host's request gate first (`ctx.connection.requestRejection` — the Host/Origin fence and browser login the host runs on its own API), so a page in another origin, or a host exposed beyond loopback, cannot reach them. On a host that publishes no such gate (older than 0.1.0-rc.8) the routes keep the loopback-origin check they always had.
+
+## Batch transcription: an hour of audio, well under a minute
+
+Measured on this machine: an **82-minute video** (1:22:10) went in, and one merged, timestamped Markdown document came out in **46.9 seconds** — 74 chunks across 8 accounts × 4 channels, 0 failed. That is roughly **105× realtime**, and the command line did the same job in about the same time.
+
+It adds no metered cost: **WorkBuddy does not bill for speech input**, so a run spends nothing but your own signed-in accounts' rate limits. The plugin itself is MIT.
+
+`wb_transcribe` (0.7.0) puts that pipeline in the conversation itself: pass file paths or a directory and the model gets the merged document back. Nothing to click, no upload dialog — just the paths.
+
+> 82 分钟的录像，47 秒转成一份带时间戳的 Markdown 文稿；免费，WorkBuddy 对语音输入不计费。
+
+The document goes to `E:/deepseek工作区/我的/产出/交付物/语音转写-<date>.md` unless `out` names another path. Every file gets a `## N. name (duration)` heading, every chunk a `[mm:ss]` marker, files stay in the order you passed them, and an empty chunk is marked in place instead of vanishing.
+
+The command line, `wb-batch.sh`, runs the same recognizer outside the composer for scripts and scheduled jobs. Every account works `--per-account` chunks at once (default 4), long media is cut at quiet points, and the chunks sit in one global queue: an account that finishes takes the next piece, so a slow file does not stall the rest.
+
+```bash
+bash wb-batch.sh talk.mp3 lecture.m4a recordings/ --out transcript.md
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--out` | `transcript.md` | Where the merged Markdown goes. |
+| `--chunk` | `60` | Preferred chunk length in seconds. |
+| `--per-account` | `4` | Concurrent recognitions per account. |
+| `--region` | `ai` | Which endpoint and account pool to use: `ai` for the international build, `cn` for the domestic one. |
+| `--no-timestamps` | off | Drop the `[mm:ss]` line before each chunk. |
+| `--keep-temp` | off | Keep the decoded PCM instead of deleting it. |
+
+Media is decoded to 16 kHz mono with ffmpeg: the script looks for `FFMPEG_PATH`, then the `wb-asr` skill's bundled binary, then `E:/deepseek工作区/我的/工具链/ffmpeg/bin/ffmpeg.exe`, then `PATH`. Video files work the same way — the audio track is used and the picture is dropped.
+
+Cut points come from the audio itself: 100 ms frames, and the boundary lands in the middle of a real pause (0.3 s or longer) nearest the target length, searching as far as 1.6x the target so a recording whose pauses come late still gets cut in silence. With no pause in reach, the quietest frame stands in. Every cut is printed when the file is queued (`cuts at 00:09 / 00:20`), so you can check the boundaries against the transcript. A chunk that comes back empty is marked in the document rather than dropped silently, and the header counts how many there were.
+
+The Node half (`batch.mjs`) needs the account pool the plugin already uses; run it through the shell wrapper so ffmpeg and the temporary directory are handled for you.
 
 ## Notes and limitations
 

@@ -938,6 +938,9 @@ function readJson(req) {
   });
 }
 
+// The batch transcriber (batch.mjs) reuses the same recognizer.
+export { tokenCandidates, resolveEndpoint, activeRegion, regionOf, recognize, recognizeStream, framed, wavToPcm, field, regionAccountCount, transcribeWithPool };
+
 /**
  * Register the WorkBuddy recognizer next to the shipped providers.
  * @param ctx - Host context providing `webServer`, `settings` and optionally `speechToText`.
@@ -996,4 +999,16 @@ export function apply(ctx, config = {}) {
     });
     return dispose;
   }, "voice-input-wb-asr: provider"));
+
+  // The in-chat tool: one call turns a pile of recordings into one document.
+  // Loaded lazily so index.js stays importable for tests and the CLI.
+  ctx.inject(["tools"], (toolCtx) => toolCtx.effect(() => {
+    let dispose = () => {};
+    let cancelled = false;
+    import("./transcribe-tool.mjs").then(({ TRANSCRIBE_TOOL }) => {
+      if (cancelled || toolCtx.tools === undefined) return;
+      dispose = toolCtx.tools.register(TRANSCRIBE_TOOL) ?? (() => {});
+    }, () => {});
+    return () => { cancelled = true; dispose(); };
+  }, "voice-input-wb-asr: transcribe tool"));
 }
