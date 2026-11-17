@@ -847,6 +847,7 @@ class PreviewChain {
     }
     if (this.stopped || this.signal.aborted || text === "") return;
     this.text = joinTranscript(this.text, text);
+    trace(`preview ${this.text.length} chars`);
     this.emit({ text: this.text });
   }
 }
@@ -1021,6 +1022,22 @@ function registerRoutes(ctx, { getConfig }) {
       },
     });
 
+    // The browser half reports here: the GUI needs a login, so this is the only
+    // way to see what the client did with a take from outside the browser.
+    const disposeTrace = ctx.webServer.register({
+      kind: "exact",
+      path: `${ROUTE_BASE}/trace`,
+      handler: async (req, res) => {
+        if (req.method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+        if (await hostRefusal(ctx, req, res)) return;
+        if (!loopbackOrigin(req)) return sendJson(res, 403, { error: "origin-not-trusted" });
+        let body = "";
+        for await (const chunk of req) body += chunk.toString("utf8");
+        trace(`client ${body.slice(0, 400)}`);
+        sendJson(res, 200, { ok: true });
+      },
+    });
+
     const disposeStream = ctx.webServer.register({
       kind: "exact",
       path: `${ROUTE_BASE}/stream`,
@@ -1162,6 +1179,7 @@ function registerRoutes(ctx, { getConfig }) {
     return () => {
       disposeConfig();
       disposeHealth();
+      disposeTrace();
       disposeStream();
       disposeTranscribe();
     };

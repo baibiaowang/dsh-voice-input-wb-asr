@@ -21,6 +21,8 @@ window.__ModuleLoader__.load({
     var NS = 'dsh-voice-input-wb-asr';
     var ROUTE = '/plugins/dsh-voice-input-wb-asr/stream';
     var CONFIG_ROUTE = '/plugins/dsh-voice-input-wb-asr/config';
+    var TRACE_ROUTE = '/plugins/dsh-voice-input-wb-asr/trace';
+    var VERSION = '0.9.1';
     var SLOT = 'conversation.input.right';
     var TARGET_RATE = 16000;
     // Below this the user tapped instead of speaking; nothing is uploaded.
@@ -254,6 +256,22 @@ window.__ModuleLoader__.load({
         view.setInt16(index * 2, Math.round(sample < 0 ? sample * 0x8000 : sample * 0x7fff), true);
       }
       return bytes;
+    }
+
+    /**
+     * One line about a take, into the Host's log. The browser half is invisible
+     * from here otherwise, and a take that stays silent is indistinguishable
+     * from one whose previews never arrived.
+     */
+    function report(step, detail) {
+      try {
+        fetch(TRACE_ROUTE, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ v: VERSION, step: step, detail: detail }),
+          keepalive: true,
+        }).catch(function ignore() {});
+      } catch (ignored) { /* tracing must never break a take */ }
     }
 
     function messageOf(cause) {
@@ -738,6 +756,7 @@ window.__ModuleLoader__.load({
         setPreview(null);
         if (session.writer !== null) {
           session.writer.text(text === null ? '' : text);
+          report('final', { chars: text === null ? 0 : text.length });
           return;
         }
         if (text === null) return; // accidental tap
@@ -774,6 +793,11 @@ window.__ModuleLoader__.load({
         });
         var session = createSession();
         session.writer = draftWriter(inputActions, shell);
+        report('start', {
+          keyboard: shell === undefined ? 'absent' : 'present',
+          setDraft: inputActions && typeof inputActions.setDraft === 'function' ? 'yes' : 'no',
+          writer: session.writer === null ? 'off' : 'on',
+        });
         session.minHoldMs = fromKey === true
           ? Math.min(ALT_MIN_HOLD_MS, settingsRef.current.minHoldMs)
           : settingsRef.current.minHoldMs;
@@ -782,8 +806,10 @@ window.__ModuleLoader__.load({
           // The composer is the preview: each sentence lands where it will stay.
           if (session.writer !== null) {
             session.writer.text(text);
+            report('partial', { chars: text.length });
             return;
           }
+          report('partial-float', { chars: text.length });
           var rect = buttonRef.current ? buttonRef.current.getBoundingClientRect() : null;
           if (rect !== null) {
             previewAtRef.current = {

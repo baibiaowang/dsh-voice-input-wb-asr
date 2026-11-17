@@ -188,6 +188,8 @@ let fetchStatus = 200;
 let fetchAborted = 0;
 /** When set, the next call returns this promise instead of resolving at once. */
 let deferredCall = null;
+/** When set, the next recognized stream answers with this instead of JSON. */
+let deferredStream = null;
 
 globalThis.window = Object.assign(windowStub, { AudioContext: FakeContext, webkitAudioContext: FakeContext });
 globalThis.document = documentStub;
@@ -200,6 +202,11 @@ globalThis.fetch = async (url, init) => {
   if (signal !== undefined) {
     signal.addEventListener('abort', () => { fetchAborted += 1; }, { once: true });
   }
+  if (deferredStream !== null && String(url).indexOf("/stream") !== -1) {
+    const hold = deferredStream;
+    deferredStream = null;
+    return hold;
+  }
   if (deferredCall !== null) {
     const hold = deferredCall;
     deferredCall = null;
@@ -208,6 +215,29 @@ globalThis.fetch = async (url, init) => {
   return { ok: fetchStatus === 200, status: fetchStatus, json: async () => ({ text: fetchReply }) };
 };
 
+/** A reply that streams events, the way the Host answers a live take. */
+function sseResponse(events) {
+  const encoder = new TextEncoder();
+  let index = 0;
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (name) => (String(name).toLowerCase() === "content-type" ? "text/event-stream; charset=utf-8" : null) },
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (index >= events.length) return { done: true, value: undefined };
+            const chunk = encoder.encode("data: " + JSON.stringify(events[index++]) + "\n\n");
+            return { done: false, value: chunk };
+          },
+          cancel() {},
+          releaseLock() {},
+        };
+      },
+    },
+  };
+}
 const loaded = [];
 globalThis.window.__ModuleLoader__ = {
   load({ id, factory }) { loaded.push({ id, factory }); },
@@ -368,8 +398,42 @@ await settle();
 await settle();
 console.log("case8 stream died on release -> fetch", fetchCalls.length, "| inserted", JSON.stringify(inserted.map((e) => e.text)));
 
+/* --- case 9: the preview is written into the composer ---------------- */
+// Two interim lines and the settled sentence: the composer must show the
+// sentence as it forms, then hold only the corrected final text.
+const drafts = [];
+const liveActions = {
+  captureInsertion: () => ({ span: "fake" }),
+  insertText: (text) => { inserted.push({ text }); return true; },
+  setDraft: (text) => { drafts.push(text); },
+};
+const shell = { projection: { clipboardText: "", quotes: [], occurrences: [] } };
+reset();
+deferredStream = Promise.resolve(sseResponse([
+  { text: "这是一段" },
+  { text: "这是一段语音识别的测试" },
+  { text: "这是一段语音识别的测试。", final: true },
+]));
+tree = runtime.render(HoldToTalk, { inputActions: liveActions, keyboard: shell });
+documentStub.activeElement = buttonNode;
+dispatch("keydown", { key: "Alt", repeat: false, isComposing: false, preventDefault() {} });
+await arm();
+say();
+say();
+await speak();
+dispatch("keyup", { key: "Alt" });
+await settle();
+await settle();
+await settle();
+console.log("case9 live typing -> drafts", JSON.stringify(drafts), "| inserted", inserted.length);
+if (drafts.length < 2 || drafts[drafts.length - 1] !== "这是一段语音识别的测试。") {
+  console.log("FAIL: the settled sentence never reached the composer");
+  process.exit(1);
+}
 /* --- the request must ask for events, or the host answers only on release */
-const posts = fetchCalls.filter((call) => call.init?.method === "POST");
+const posts = fetchCalls.filter((call) => call.init?.method === "POST" && String(call.url).indexOf("/stream") !== -1);
+const traces = fetchCalls.filter((call) => String(call.url).indexOf("/trace") !== -1);
+console.log("trace reports on the last take:", traces.length);
 const askedForEvents = posts.filter((call) => String(call.init?.headers?.accept ?? "").indexOf("text/event-stream") !== -1);
 console.log("asks for events on every take:", askedForEvents.length, "of", posts.length);
 if (posts.length === 0 || askedForEvents.length !== posts.length) {
