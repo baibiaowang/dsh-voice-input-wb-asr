@@ -16,11 +16,11 @@
  * reader are implemented here (ported from the wb-asr skill's pure-stdlib
  * client).
  */
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import { connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import z from "@deepseek-ai/schemastery";
 
@@ -663,6 +663,24 @@ const QUIET_PEAK = Math.round(32768 * 0.04);
 const PAUSE_FRAMES = 3;
 /** A segment shorter than half a second is a click, not worth recognizing. */
 const MIN_SEGMENT_FRAMES = 5;
+/**
+ * Longest phrase held before cutting anyway. A room that never goes quiet
+ * would otherwise produce a single segment at `finish()`, so the preview would
+ * land at the same moment as the final text and never be seen.
+ */
+const MAX_SEGMENT_FRAMES = 60;
+
+/** Opt-out trace (`WB_ASR_DEBUG=0`): one line per preview stage, in the temp dir. */
+const DEBUG_LOG = process.env.WB_ASR_DEBUG === "0" ? undefined : join(tmpdir(), "wb-asr-debug.log");
+
+function trace(...parts) {
+  if (DEBUG_LOG === undefined) return;
+  try {
+    appendFileSync(DEBUG_LOG, `${new Date().toISOString()} ${parts.join(" ")}\n`);
+  } catch {
+    // Diagnostics must never break a dictation.
+  }
+}
 
 /** Peak sample of one 16-bit mono frame, sign ignored. */
 function framePeak(frame) {
@@ -710,7 +728,10 @@ class PauseSegmenter {
   finish() {
     if (this.#pending.length > 0) this.#absorb(Buffer.from(this.#pending));
     this.#pending = Buffer.alloc(0);
-    if (this.#frames.length >= MIN_SEGMENT_FRAMES) this.onSegment(Buffer.concat(this.#frames));
+    if (this.#frames.length >= MIN_SEGMENT_FRAMES) {
+      trace(`segment ${(this.#frames.length / 10).toFixed(1)}s finish`);
+      this.onSegment(Buffer.concat(this.#frames));
+    }
     this.#frames = [];
     this.#quiet = 0;
   }
@@ -719,6 +740,7 @@ class PauseSegmenter {
     if (framePeak(frame) >= QUIET_PEAK) {
       this.#quiet = 0;
       this.#frames.push(frame);
+      if (this.#frames.length >= MAX_SEGMENT_FRAMES) this.#forceCut();
       return;
     }
     this.#quiet += 1;
@@ -732,7 +754,35 @@ class PauseSegmenter {
     const phrase = this.#frames.slice(0, this.#frames.length - (this.#quiet - 1));
     this.#frames = [];
     this.#quiet = 0;
-    if (phrase.length >= MIN_SEGMENT_FRAMES) this.onSegment(Buffer.concat(phrase));
+    if (phrase.length >= MIN_SEGMENT_FRAMES) {
+      trace(`segment ${(phrase.length / 10).toFixed(1)}s pause`);
+      this.onSegment(Buffer.concat(phrase));
+    }
+  }
+
+  /**
+   * Split where the signal is weakest, so a forced cut lands between syllables
+   * instead of inside a vowel.
+   */
+  #forceCut() {
+    const from = Math.max(0, this.#frames.length - 20);
+    let cut = this.#frames.length;
+    let quietest = Infinity;
+    for (let index = from; index < this.#frames.length; index += 1) {
+      const peak = framePeak(this.#frames[index]);
+      if (peak < quietest) {
+        quietest = peak;
+        cut = index;
+      }
+    }
+    const keep = Math.max(MIN_SEGMENT_FRAMES, Math.min(cut, this.#frames.length - MIN_SEGMENT_FRAMES));
+    const phrase = this.#frames.slice(0, keep);
+    this.#frames = this.#frames.slice(keep);
+    this.#quiet = 0;
+    if (phrase.length >= MIN_SEGMENT_FRAMES) {
+      trace(`segment ${(phrase.length / 10).toFixed(1)}s forced (quietest ${quietest})`);
+      this.onSegment(Buffer.concat(phrase));
+    }
   }
 }
 
@@ -988,6 +1038,7 @@ function registerRoutes(ctx, { getConfig }) {
         // Without that header the reply stays one JSON body, which keeps old
         // callers and curl working.
         const wantsEvents = String(req.headers.accept ?? "").includes("text/event-stream");
+        trace(`stream accept=${req.headers.accept ?? "-"} origin=${req.headers.origin ?? "-"} events=${wantsEvents}`);
         const emit = (body) => {
           if (res.writableEnded || res.destroyed) return;
           res.write(`data: ${JSON.stringify(body)}\n\n`);
@@ -997,7 +1048,10 @@ function registerRoutes(ctx, { getConfig }) {
         const preview = wantsEvents
           ? new PreviewChain({ config: live, endpoint, timeoutMs, signal: abort.signal, emit })
           : undefined;
-        const segmenter = preview === undefined ? undefined : new PauseSegmenter((pcm) => preview.push(pcm));
+        const segmenter =
+          preview === undefined
+            ? undefined
+            : new PauseSegmenter((pcm) => preview.push(pcm));
         const limit = 4 * 1024 * 1024;
         res.on("close", () => {
           if (!res.writableEnded) abort.abort(new Error("client disconnected"));
@@ -1036,6 +1090,7 @@ function registerRoutes(ctx, { getConfig }) {
             live,
           );
           preview?.stop();
+          trace(`stream final ${result.text.length} chars`);
           if (wantsEvents) {
             emit({
               text: result.text,
