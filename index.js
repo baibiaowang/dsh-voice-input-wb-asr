@@ -659,16 +659,16 @@ class ChunkQueue {
  * 32768, so 4% is room tone and breath; a soft consonant still clears it.
  */
 const QUIET_PEAK = Math.round(32768 * 0.04);
-/** 0.3 s of quiet is a phrase boundary; anything shorter sits inside a word. */
-const PAUSE_FRAMES = 3;
-/** A segment shorter than half a second is a click, not worth recognizing. */
-const MIN_SEGMENT_FRAMES = 5;
+/** 0.2 s of quiet is a phrase boundary; anything shorter sits inside a word. */
+const PAUSE_FRAMES = 2;
+/** A segment shorter than 0.4 s is a click, not worth recognizing. */
+const MIN_SEGMENT_FRAMES = 4;
 /**
  * Longest phrase held before cutting anyway. A room that never goes quiet
  * would otherwise produce a single segment at `finish()`, so the preview would
  * land at the same moment as the final text and never be seen.
  */
-const MAX_SEGMENT_FRAMES = 60;
+const MAX_SEGMENT_FRAMES = 30;
 
 /** Opt-out trace (`WB_ASR_DEBUG=0`): one line per preview stage, in the temp dir. */
 const DEBUG_LOG = process.env.WB_ASR_DEBUG === "0" ? undefined : join(tmpdir(), "wb-asr-debug.log");
@@ -805,22 +805,30 @@ function joinTranscript(left, right) {
  * decoded by the final pass.
  */
 class PreviewChain {
-  constructor({ config, endpoint, timeoutMs, signal, emit }) {
+  constructor({ config, endpoint, timeoutMs, signal, emit, lanes = 2 }) {
     this.config = config;
     this.endpoint = endpoint;
     this.timeoutMs = timeoutMs;
     this.signal = signal;
     this.emit = emit;
+    /** Phrases overlap in flight, so a slow answer does not stall the next one. */
+    this.lanes = Math.max(1, Math.min(4, Number(lanes) || 1));
     this.text = "";
     this.stopped = false;
-    this.serial = Promise.resolve();
+    this.jobs = [];
+    this.running = 0;
+    this.issued = 0;
+    /** Answers that are back but cannot be published yet, keyed by phrase. */
+    this.settled = new Map();
+    this.nextToPublish = 0;
     /** Rotate accounts so a long dictation does not hammer one of them. */
     this.turn = 0;
   }
 
   push(pcm) {
-    this.serial = this.serial.then(() => this.#run(pcm)).catch(() => {});
-    return this.serial;
+    this.jobs.push({ seq: this.issued, pcm });
+    this.issued += 1;
+    this.#pump();
   }
 
   /** The final text is in hand; stop publishing previews. */
@@ -828,25 +836,57 @@ class PreviewChain {
     this.stopped = true;
   }
 
-  async #run(pcm) {
-    if (this.stopped || this.signal.aborted) return;
-    const candidates = tokenCandidates(this.config);
-    if (candidates.length === 0) return;
-    const candidate = candidates[this.turn % candidates.length];
-    this.turn += 1;
-    let text;
-    try {
-      text = await recognize(pcm, {
-        token: candidate.token,
-        endpoint: this.endpoint,
-        timeoutMs: this.timeoutMs,
-        signal: this.signal,
+  #pump() {
+    while (!this.stopped && !this.signal.aborted && this.running < this.lanes && this.jobs.length > 0) {
+      const job = this.jobs.shift();
+      this.running += 1;
+      this.#run(job).finally(() => {
+        this.running -= 1;
+        this.#pump();
       });
-    } catch {
-      return;
     }
-    if (this.stopped || this.signal.aborted || text === "") return;
-    this.text = joinTranscript(this.text, text);
+  }
+
+  async #run(job) {
+    let text = "";
+    if (!this.stopped && !this.signal.aborted) {
+      const candidates = tokenCandidates(this.config);
+      if (candidates.length > 0) {
+        const candidate = candidates[this.turn % candidates.length];
+        this.turn += 1;
+        try {
+          text = await recognize(job.pcm, {
+            token: candidate.token,
+            endpoint: this.endpoint,
+            timeoutMs: this.timeoutMs,
+            signal: this.signal,
+          });
+        } catch {
+          text = "";
+        }
+      }
+    }
+    this.settled.set(job.seq, typeof text === "string" ? text : "");
+    this.#publish();
+  }
+
+  /**
+   * Publish in phrase order even though phrases finish out of order: what the
+   * reader sees must never swap two sentences around.
+   */
+  #publish() {
+    if (this.stopped || this.signal.aborted) return;
+    let grew = false;
+    while (this.settled.has(this.nextToPublish)) {
+      const text = this.settled.get(this.nextToPublish);
+      this.settled.delete(this.nextToPublish);
+      this.nextToPublish += 1;
+      if (text !== "") {
+        this.text = joinTranscript(this.text, text);
+        grew = true;
+      }
+    }
+    if (!grew) return;
     trace(`preview ${this.text.length} chars`);
     this.emit({ text: this.text });
   }
@@ -1063,7 +1103,7 @@ function registerRoutes(ctx, { getConfig }) {
         // Preview only: the take below still goes to one continuous session, so
         // the text the user keeps carries the service's whole-utterance fix-up.
         const preview = wantsEvents
-          ? new PreviewChain({ config: live, endpoint, timeoutMs, signal: abort.signal, emit })
+          ? new PreviewChain({ config: live, endpoint, timeoutMs, signal: abort.signal, emit, lanes: 2 })
           : undefined;
         const segmenter =
           preview === undefined

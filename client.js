@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
     var ROUTE = '/plugins/dsh-voice-input-wb-asr/stream';
     var CONFIG_ROUTE = '/plugins/dsh-voice-input-wb-asr/config';
     var TRACE_ROUTE = '/plugins/dsh-voice-input-wb-asr/trace';
-    var VERSION = '0.9.4';
+    var VERSION = '0.9.5';
     var SLOT = 'conversation.input.right';
     var TARGET_RATE = 16000;
     // Below this the user tapped instead of speaking; nothing is uploaded.
